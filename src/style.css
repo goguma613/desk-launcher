@@ -1,0 +1,308 @@
+/* ===========================================================================
+   디자인 토큰 — docs/design-handoff.md 기준
+   ---------------------------------------------------------------------------
+   색은 rgb 채널만 변수에 담고 alpha는 사용처에서 붙입니다.
+       rgb(var(--tile) / var(--surface-alpha-hover))
+   시안 문서의 hex/rgba 값을 채널로 바꿔 넣은 것이라, 값을 고칠 때도
+   이 형태를 유지하세요.
+
+   시안 토큰 → 이 파일 대응
+       --bg-panel     → --panel + --panel-alpha
+       --bg-surface   → --panel-raise
+       --bg-hover     → --tile + --tile-alpha-hover
+       --bg-press     → --tile + --tile-alpha-active
+       --text-strong  → --text
+       --text-item    → --text-item
+       --text-muted   → --text-dim
+       --text-faint   → --text-faint
+       --border       → --line + --line-alpha
+       --divider      → --line + --divider-alpha
+       --accent-soft  → --accent + --accent-soft-alpha
+       --drop-line    → --accent + --drop-line-alpha
+   =========================================================================== */
+
+@font-face {
+  font-family: "Pretendard Variable";
+  src: url("/fonts/PretendardVariable.woff2") format("woff2-variations");
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* 타이포 */
+  --font-ui: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
+    system-ui, "Segoe UI", "Malgun Gothic", "맑은 고딕", sans-serif;
+  --fs-tab: 13px;
+  --fs-name: 11px;
+  --fs-title: 13.5px;
+  --fs-label: 11px;
+  --fs-caption: 11px;
+  --fs-letter: 18px; /* 이름 첫 글자 폴백 */
+
+  /* 간격 — 시안 스케일 4 · 7 · 10 · 12 · 14 · 18 */
+  --space-1: 4px;
+  --space-2: 7px;
+  --space-3: 10px;
+  --space-4: 12px;
+  --space-5: 14px;
+  --space-6: 18px;
+
+  --panel-pad: 10px; /* 패널 좌우 */
+  --grid-pad: 12px; /* 격자 상하 */
+  --tile-gap: 4px;
+
+  /* 모서리 */
+  --radius-tile: 10px;
+  --radius-icon: 10px;
+  --radius-fallback: 11px;
+  --radius-panel: 14px;
+  --radius-box: 18px;
+  --radius-control: 8px;
+  --radius-pill: 999px;
+
+  /* 모션 — 상시 떠 있는 도구라 짧게, 이징은 전부 동일 */
+  --dur-hover: 120ms;
+  --dur-leave: 160ms;
+  --dur-press: 80ms;
+  --dur-drag: 140ms;
+  --dur-tab: 160ms;
+  --dur-overlay: 140ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.3, 1);
+
+  /* 창 배경 불투명도 — 설정에서 조절됩니다 */
+  --panel-alpha: 0.96;
+}
+
+:root,
+:root[data-theme="dark"] {
+  --panel: 20 22 26;
+  --panel-raise: 34 38 45;
+
+  --line: 255 255 255;
+  --line-alpha: 0.08;
+  --divider-alpha: 0.07;
+
+  /* 항목 셀 전용. 시안의 --bg-hover / --bg-press 입니다.
+     기본 상태는 배경이 없으므로 쉼 값이 따로 없습니다. */
+  --tile: 255 255 255;
+  --tile-alpha-hover: 0.06;
+  --tile-alpha-active: 0.11;
+
+  /* 이미 면을 깔고 있는 컨트롤(버튼·입력칸·카드)용.
+     셀 값(0.06)을 그대로 쓰면 쉼 상태(0.055)와 차이가 없어 호버가 안 보입니다. */
+  --surface-alpha: 0.055;
+  --surface-alpha-hover: 0.1;
+
+  --text: 233 235 238;
+  --text-item: 185 191 200;
+  --text-dim: 142 149 160;
+  --text-faint: 110 118 131;
+
+  --accent: 224 164 88;
+  /* accent-soft 바탕 위의 글자색. 라이트에서 액센트를 그대로 쓰면 3:1까지
+     떨어져 11px 글자가 흐려집니다. */
+  --accent-ink: 224 164 88;
+  /* 액센트를 배경으로 깐 버튼. 라이트에서는 한 단계 어둡게 갑니다. */
+  --accent-btn: 224 164 88;
+  --accent-soft-alpha: 0.14;
+  --accent-on: 20 22 26;
+  --drop-line-alpha: 0.6;
+
+  --icon-fallback: 197 203 212;
+  --danger: 226 118 118;
+
+  --shadow-panel: 0 18px 44px rgb(0 0 0 / 0.45);
+  --shadow-overlay: 0 28px 70px rgb(0 0 0 / 0.55);
+  --shadow-drag: 0 12px 26px rgb(0 0 0 / 0.55);
+}
+
+:root[data-theme="light"] {
+  --panel: 252 252 253;
+  --panel-raise: 233 236 240;
+
+  --line: 0 0 0;
+  --line-alpha: 0.1;
+  --divider-alpha: 0.08;
+
+  --tile: 0 0 0;
+  --tile-alpha-hover: 0.05;
+  --tile-alpha-active: 0.09;
+
+  /* 라이트에서 쉼과 호버가 같은 값(0.05)이면 호버가 통째로 무효가 됩니다 */
+  --surface-alpha: 0.04;
+  --surface-alpha-hover: 0.09;
+
+  --text: 20 23 28;
+  --text-item: 61 68 78;
+  --text-dim: 102 109 121;
+  --text-faint: 110 117 128;
+
+  /* 다크의 앰버를 흰 바탕에 그대로 쓰면 대비가 2.1:1까지 떨어집니다 */
+  --accent: 184 122 46;
+  --accent-ink: 122 78 26;
+  --accent-btn: 154 99 31;
+  --accent-soft-alpha: 0.12;
+  --accent-on: 255 255 255;
+  --drop-line-alpha: 0.55;
+
+  --icon-fallback: 90 98 109;
+  --danger: 199 50 84;
+
+  --shadow-panel: 0 18px 44px rgb(22 28 38 / 0.2);
+  --shadow-overlay: 0 28px 70px rgb(22 28 38 / 0.26);
+  --shadow-drag: 0 12px 26px rgb(22 28 38 / 0.26);
+}
+
+/* ===========================================================================
+   전역
+   =========================================================================== */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* 런처 창은 투명합니다. 배경은 .panel이 그립니다. */
+  background: transparent;
+  font-family: var(--font-ui);
+  font-weight: 400;
+  color: rgb(var(--text));
+  font-size: var(--fs-caption);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  cursor: default;
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+/* 스크롤바 — 얇게 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--tile) / 0.14);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--tile) / 0.24);
+  background-clip: padding-box;
+}
+
+/* ===========================================================================
+   공용 컨트롤
+   =========================================================================== */
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-control);
+  color: rgb(var(--text-dim));
+  transition: background var(--dur-hover) var(--ease),
+    color var(--dur-hover) var(--ease);
+}
+.icon-btn:hover {
+  background: rgb(var(--tile) / var(--surface-alpha-hover));
+  color: rgb(var(--text));
+}
+.icon-btn.on {
+  background: rgb(var(--accent) / var(--accent-soft-alpha));
+  color: rgb(var(--accent-ink));
+}
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* 섹션 라벨 — 700, 자간 .1em */
+.field-label {
+  display: block;
+  font-size: var(--fs-label);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: rgb(var(--text-dim));
+  margin-bottom: var(--space-2);
+}
+
+.text-input {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: var(--radius-control);
+  background: rgb(var(--tile) / var(--surface-alpha));
+  border: 1px solid rgb(var(--line) / var(--line-alpha));
+  outline: none;
+  transition: border-color var(--dur-hover) var(--ease);
+}
+.text-input:focus {
+  border-color: rgb(var(--accent) / 0.7);
+}
+
+.btn {
+  padding: 7px 13px;
+  border-radius: var(--radius-control);
+  background: rgb(var(--tile) / var(--surface-alpha));
+  transition: background var(--dur-hover) var(--ease);
+}
+.btn:hover {
+  background: rgb(var(--tile) / var(--surface-alpha-hover));
+}
+.btn.primary {
+  background: rgb(var(--accent-btn));
+  color: rgb(var(--accent-on));
+  font-weight: 700;
+}
+.btn.primary:hover {
+  filter: brightness(1.08);
+}
+.btn.danger {
+  color: rgb(var(--danger));
+}
+.btn.danger:hover {
+  background: rgb(var(--danger) / 0.16);
+}
+
+/* 전체 이름 툴팁 — 0.6초 호버 뒤 */
+.name-tip {
+  position: fixed;
+  z-index: 200;
+  max-width: 260px;
+  padding: 5px 9px;
+  border-radius: var(--radius-control);
+  background: rgb(var(--panel-raise));
+  border: 1px solid rgb(var(--line) / var(--line-alpha));
+  box-shadow: var(--shadow-drag);
+  font-size: var(--fs-caption);
+  line-height: 1.45;
+  color: rgb(var(--text));
+  pointer-events: none;
+  word-break: break-all;
+}
