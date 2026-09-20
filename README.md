@@ -46,7 +46,7 @@ npm run tauri build
 항목과 설정은 전부 파일 하나에 저장됩니다.
 
 ```
-%APPDATA%\com.tpgus.desk-launcher\state.json
+%APPDATA%\io.github.goguma613.desk-launcher\state.json
 ```
 
 설정 화면의 `설정 파일 폴더 열기` 버튼으로 바로 갈 수 있습니다. 이 파일만
@@ -95,7 +95,7 @@ npm run tauri build
 ## 아는 제약
 
 - **아이콘은 처음 한 번만 느립니다.** 탐색기가 쓰는 `IShellItemImageFactory`로
-  뽑아 `%APPDATA%\com.tpgus.desk-launcher\icons\`에 96px PNG로 저장합니다.
+  뽑아 `%APPDATA%\io.github.goguma613.desk-launcher\icons\`에 96px PNG로 저장합니다.
   대상 파일의 수정 시각이 바뀌면 자동으로 다시 뽑고, 그래도 갱신이 안 되면
   설정 창의 `아이콘 새로 고침`을 쓰세요.
 - **파비콘은 외부 요청입니다.** 먼저 사이트의 `/favicon.ico`를 시도하고, 실패하면
