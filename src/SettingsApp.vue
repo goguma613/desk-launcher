@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 
 import ShortcutInput from "./components/ShortcutInput.vue";
 import { UI_ICONS } from "./icons";
@@ -34,6 +34,11 @@ const update = ref(null); // { version, notes, install }
 /** "" | "checking" | "none" | "found" | "installing" | 에러 문구 */
 const updateState = ref("");
 
+/** 결과를 런처 창에도 알려 톱니 표시점을 맞춥니다. */
+function shareUpdateState(v) {
+  emit("launcher://update-state", v || "");
+}
+
 async function checkForUpdate() {
   updateState.value = "checking";
   update.value = null;
@@ -41,6 +46,7 @@ async function checkForUpdate() {
     const found = await findUpdate();
     update.value = found;
     updateState.value = found ? "found" : "none";
+    shareUpdateState(found ? found.version : "");
   } catch (e) {
     updateState.value = `확인하지 못했습니다: ${e}`;
   }
@@ -205,6 +211,8 @@ onMounted(async () => {
     .then((v) => (version.value = v))
     .catch(() => {});
 
+  checkForUpdate();
+
   unlisteners.push(
     await listen("launcher://state-saved", async () => {
       await rehydrate();
@@ -221,6 +229,8 @@ onMounted(async () => {
       await rehydrate();
       applyTheme();
       applyOpacity();
+      // 열면 이미 결과가 나와 있게. 「확인」을 누를 필요가 없습니다.
+      checkForUpdate();
     })
   );
 

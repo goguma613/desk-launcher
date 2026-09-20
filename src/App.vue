@@ -68,6 +68,33 @@ const items = computed(() => tab.value?.items ?? []);
    찾을 수 있는 게 가장 큰 병목이라, 전체 탭을 한 번에 훑습니다.
    --------------------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------------------
+   업데이트 감지
+   ---------------------------------------------------------------------------
+   상시 띄워두는 도구라 재시작할 일이 거의 없습니다. 켤 때 한 번만 보면
+   사실상 수동 확인에 기대는 셈이라, 돌아가는 동안에도 주기적으로 봅니다.
+   토스트는 사라지므로 톱니 버튼에 점을 남겨 놓칠 수 없게 합니다.
+   --------------------------------------------------------------------------- */
+
+const UPDATE_EVERY = 6 * 60 * 60 * 1000; // 6시간
+
+/** 받을 수 있는 새 버전. 없으면 "" */
+const updateReady = ref("");
+/** 같은 버전을 계속 알리지 않도록 */
+let notifiedVersion = "";
+let updateTimer = null;
+
+async function pollUpdate() {
+  const found = await findUpdateQuietly();
+  updateReady.value = found ? found.version : "";
+  if (!found || found.version === notifiedVersion) return;
+  notifiedVersion = found.version;
+  flash(`새 버전 v${found.version} 이 있습니다`, {
+    label: "설정 열기",
+    run: () => invoke("open_settings"),
+  });
+}
+
 /** 항목을 끌어다 올린 탭 id */
 const dragOverTab = ref("");
 
@@ -220,6 +247,7 @@ let relayoutTimer = null;
 /** 디스플레이 변경 이벤트는 몰려서 들어옵니다. 마지막 것 하나만 처리합니다. */
 function scheduleRelayout() {
   if (relayoutTimer) clearTimeout(relayoutTimer);
+  if (updateTimer) clearInterval(updateTimer);
   relayoutTimer = setTimeout(() => {
     relayoutTimer = null;
     if (ready.value) applyLayout();
@@ -608,13 +636,8 @@ onMounted(async () => {
   pruneOrphans(state.tabs.flatMap((t) => t.items).map((it) => it.path));
 
   // 새 버전이 있으면 알려만 줍니다. 설치는 설정 창에서.
-  findUpdateQuietly().then((found) => {
-    if (!found) return;
-    flash(`새 버전 v${found.version} 이 있습니다`, {
-      label: "설정 열기",
-      run: () => invoke("open_settings"),
-    });
-  });
+  pollUpdate();
+  updateTimer = setInterval(pollUpdate, UPDATE_EVERY);
 
   if (loadFailure.value) {
     flash("설정을 읽지 못해 기본값으로 시작했습니다", {
@@ -674,6 +697,11 @@ onMounted(async () => {
   );
 
   // 설정 창에서 「아이콘 새로 고침」을 누르면 이 창의 메모리 캐시도 비웁니다.
+  unlisteners.push(
+    await listen("launcher://update-state", (e) => {
+      updateReady.value = e.payload || "";
+    })
+  );
   unlisteners.push(
     await listen("launcher://icons-cleared", () => {
       clearLocal();
@@ -847,7 +875,12 @@ watch(
       </button>
       <button
         class="foot-btn"
-        title="설정 — 배치 · 모드 · 탭 편집 · 단축키"
+        :class="{ badge: updateReady }"
+        :title="
+          updateReady
+            ? `새 버전 v${updateReady} 이 있습니다 — 설정에서 설치`
+            : '설정 — 배치 · 모드 · 탭 편집 · 단축키'
+        "
         @click="invoke('open_settings')"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1172,6 +1205,7 @@ watch(
 /* ---- 알림 ------------------------------------------------------------- */
 
 .foot-btn {
+  position: relative;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -1196,6 +1230,19 @@ watch(
   background: rgb(var(--accent) / var(--accent-soft-alpha));
   color: rgb(var(--accent-ink));
   font-weight: 700;
+}
+
+/* 새 버전이 있을 때. 토스트는 사라지지만 이 점은 남습니다. */
+.foot-btn.badge::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: rgb(var(--accent));
+  box-shadow: 0 0 0 2px rgb(var(--panel));
 }
 
 /* 하단 가로 바는 자리가 좁아 아이콘만 남깁니다 */
