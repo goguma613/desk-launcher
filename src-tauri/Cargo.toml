@@ -1,6 +1,6 @@
 [package]
 name = "desk-launcher"
-version = "0.1.0"
+version = "0.2.0"
 description = "바탕화면 런처 위젯"
 authors = ["goguma613"]
 edition = "2021"

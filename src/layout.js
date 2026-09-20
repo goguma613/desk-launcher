@@ -134,8 +134,11 @@ export function iconBox() {
  * 빈 탭은 시안대로 최소 높이로 줄어듭니다. 항목이 있는 탭끼리는 **가장 많은
  * 탭을 기준**으로 크기를 고정합니다. 탭마다 제 항목 수로 계산하면 6개 탭에서
  * 30개 탭으로 넘어갈 때 세로 중앙 정렬 탓에 창이 위아래로 크게 튑니다.
+ *
+ * 검색 중에는 결과 수가 곧 보여줄 수이므로 호출부가 직접 넘깁니다.
  */
-function sizingCount() {
+function sizingCount(override) {
+  if (typeof override === "number") return override;
   const tab = state.tabs.find((t) => t.id === state.activeTabId) || state.tabs[0];
   if (!tab || tab.items.length === 0) return 0;
   return state.tabs.reduce((max, t) => Math.max(max, t.items.length), 0);
@@ -148,14 +151,14 @@ function sizingCount() {
  * 글자를 키우지 않고 들어가는 줄 수만 달라집니다.
  * 최대 높이는 작업 영역(작업표시줄 제외) 세로의 82%입니다.
  */
-export function windowSize(area) {
+export function windowSize(area, countOverride) {
   const s = state.settings;
   const sp = spec(s.preset);
   const pad = shadowPad(s.preset);
   const padX = pad.left + pad.right;
   const padY = pad.top + pad.bottom;
 
-  const count = sizingCount();
+  const count = sizingCount(countOverride);
   const cell = cellHeight(s.preset);
   // 최대 높이는 시안대로 작업 영역의 82%. 그림자 자리는 그 밖입니다.
   const maxH = area.height * 0.82;

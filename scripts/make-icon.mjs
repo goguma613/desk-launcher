@@ -34,9 +34,14 @@ function coverage(d) {
 
 /* --- 색 ------------------------------------------------------------------ */
 
-const BG_TOP = [96, 140, 236];
-const BG_BOTTOM = [122, 162, 247];
-const TILE = [255, 255, 255];
+/* 시안 팔레트를 따릅니다.
+   바탕은 패널색(--panel #14161A ~ --panel-raise #22262D),
+   타일은 액센트 앰버(--accent #E0A458).
+   작업 표시줄이 대개 어두우므로, 대비는 앰버 타일이 냅니다. */
+const BG_TOP = [26, 30, 36];
+const BG_BOTTOM = [37, 42, 50];
+const TILE_TOP = [234, 176, 106];
+const TILE_BOTTOM = [216, 155, 78];
 
 function mix(a, b, t) {
   return [
@@ -86,9 +91,10 @@ for (let y = 0; y < SIZE; y += 1) {
     }
 
     if (tileCov > 0) {
-      r = Math.round(r + (TILE[0] - r) * tileCov);
-      g = Math.round(g + (TILE[1] - g) * tileCov);
-      b = Math.round(b + (TILE[2] - b) * tileCov);
+      const [tr, tg, tb] = mix(TILE_TOP, TILE_BOTTOM, py / SIZE);
+      r = Math.round(r + (tr - r) * tileCov);
+      g = Math.round(g + (tg - g) * tileCov);
+      b = Math.round(b + (tb - b) * tileCov);
       a = Math.max(a, tileCov * bgCov);
     }
 

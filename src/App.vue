@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -60,6 +60,53 @@ const basePos = ref({ x: 0, y: 0 });
 
 const tab = computed(() => activeTab());
 const items = computed(() => tab.value?.items ?? []);
+
+/* ---------------------------------------------------------------------------
+   검색
+   ---------------------------------------------------------------------------
+   탭이 8개면 항목이 200개를 넘어갑니다. 어느 탭에 넣었는지 기억해야
+   찾을 수 있는 게 가장 큰 병목이라, 전체 탭을 한 번에 훑습니다.
+   --------------------------------------------------------------------------- */
+
+/** 항목을 끌어다 올린 탭 id */
+const dragOverTab = ref("");
+
+const searching = ref(false);
+const query = ref("");
+const searchInput = ref(null);
+
+const matches = computed(() => {
+  const q = query.value.trim().toLowerCase();
+  if (!q) return [];
+  const out = [];
+  for (const t of state.tabs) {
+    for (const it of t.items) {
+      if (
+        it.name.toLowerCase().includes(q) ||
+        it.path.toLowerCase().includes(q)
+      ) {
+        out.push(it);
+      }
+    }
+  }
+  return out;
+});
+
+/** 격자에 실제로 그릴 목록 */
+const shown = computed(() => (searching.value ? matches.value : items.value));
+
+async function openSearch() {
+  if (searching.value) return;
+  searching.value = true;
+  editing.value = false;
+  await nextTick();
+  searchInput.value?.focus();
+}
+
+function closeSearch() {
+  searching.value = false;
+  query.value = "";
+}
 const preset = computed(() => spec(state.settings.preset));
 const axis = computed(() => preset.value.axis);
 
@@ -140,7 +187,10 @@ async function applyLayout() {
   try {
     area.value = await invoke("work_area");
     const s = state.settings;
-    const size = windowSize(area.value);
+    const size = windowSize(
+      area.value,
+      searching.value ? matches.value.length : undefined
+    );
 
     // 항목 편집 시트가 열려 있으면 최소한의 세로를 확보합니다.
     const height = overlay.value
@@ -251,6 +301,30 @@ function onMove(from, to) {
   moveItem(state.activeTabId, from, to);
 }
 
+/** 타일을 탭 위로 끌어다 놓아 옮깁니다. */
+function onDropOnTab(tabId, item) {
+  if (!item || tabId === state.activeTabId) return;
+  const to = state.tabs.find((t) => t.id === tabId);
+  if (!to) return;
+  const from = state.tabs.find((t) =>
+    t.items.some((it) => it.id === item.id)
+  );
+  if (!from) return;
+  const i = from.items.findIndex((it) => it.id === item.id);
+  const [moved] = from.items.splice(i, 1);
+  to.items.push(moved);
+  flash(`${to.name} 탭으로 옮겼습니다`, {
+    label: "되돌리기",
+    run: () => {
+      const back = to.items.findIndex((it) => it.id === moved.id);
+      if (back >= 0) {
+        to.items.splice(back, 1);
+        from.items.splice(Math.min(i, from.items.length), 0, moved);
+      }
+    },
+  });
+}
+
 async function registerPaths(paths) {
   if (!paths.length) return;
   try {
@@ -313,6 +387,13 @@ function openOverlay(kind, item = null) {
 }
 
 function openEditor(item) {
+  // 검색 결과에서 열었다면 그 항목이 사는 탭으로 먼저 옮깁니다.
+  // 안 그러면 삭제·이동이 엉뚱한 탭에 적용됩니다.
+  const owner = state.tabs.find((t) =>
+    t.items.some((it) => it.id === item.id)
+  );
+  if (owner && owner.id !== state.activeTabId) state.activeTabId = owner.id;
+  if (searching.value) closeSearch();
   openOverlay("item", item);
 }
 
@@ -426,6 +507,8 @@ function fingerprint() {
     emptyTab: items.value.length === 0,
     itemCount: state.tabs.reduce((n, t) => n + t.items.length, 0),
     overlayOpen: overlay.value !== null,
+    searching: searching.value,
+    matchCount: searching.value ? matches.value.length : -1,
     paths: state.tabs
       .flatMap((t) => t.items.map((it) => it.path))
       .join(" "),
@@ -450,7 +533,9 @@ async function applyChanged() {
     now.showNames !== was.showNames ||
     now.emptyTab !== was.emptyTab ||
     now.itemCount !== was.itemCount ||
-    now.overlayOpen !== was.overlayOpen
+    now.overlayOpen !== was.overlayOpen ||
+    now.searching !== was.searching ||
+    now.matchCount !== was.matchCount
   ) {
     await applyLayout();
   }
@@ -486,8 +571,15 @@ function onKeydown(e) {
     }
   }
 
+  if (e.ctrlKey && (e.key === "f" || e.key === "F")) {
+    e.preventDefault();
+    openSearch();
+    return;
+  }
+
   if (e.key !== "Escape") return;
   if (overlay.value) closeOverlay();
+  else if (searching.value) closeSearch();
   else if (editing.value) editing.value = false;
   else if (state.settings.mode === "overlay") invoke("hide_window");
 }
@@ -634,11 +726,35 @@ watch(
   >
     <!-- 탭 바 -->
     <header class="tabbar" :inert="overlay !== null" data-tauri-drag-region>
+      <!-- 검색 중에는 탭 바 자리를 입력칸이 씁니다 -->
+      <template v-if="searching">
+        <input
+          ref="searchInput"
+          v-model="query"
+          class="search-input"
+          type="text"
+          placeholder="이름으로 찾기"
+          spellcheck="false"
+          @keydown.escape="closeSearch"
+        />
+        <button class="head-btn" title="검색 끝내기" @click="closeSearch">
+          닫기
+        </button>
+      </template>
+
+      <template v-else>
       <TabBar
         :tabs="state.tabs"
         :active-id="state.activeTabId"
+        :drop-target="dragOverTab"
         @select="state.activeTabId = $event"
       />
+
+      <button class="head-btn" title="찾기 (Ctrl+F)" @click="openSearch">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"
+             v-html="UI_ICONS.search" />
+      </button>
 
       <button
         v-if="editing"
@@ -661,27 +777,33 @@ watch(
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="1.8" stroke-linecap="round" v-html="UI_ICONS.plus" />
       </button>
+      </template>
     </header>
 
     <!-- 항목 격자 -->
     <main class="body" :inert="overlay !== null">
       <ItemGrid
-        v-if="items.length"
-        :key="state.activeTabId"
-        :items="items"
+        v-if="shown.length"
+        :key="searching ? 'search' : state.activeTabId"
+        :items="shown"
         :columns="preset.cols"
         :cell-w="preset.cellW"
         :cell-h="cellHeight()"
         :icon-box="preset.iconBox"
         :name-max="preset.nameMax"
-        :editing="editing"
+        :editing="editing && !searching"
         :show-names="state.settings.showNames"
         :missing="missing"
         @open="openItem"
         @edit="openEditor"
         @remove="onRemove"
         @move="onMove"
+        @over-tab="dragOverTab = $event"
+        @drop-on-tab="onDropOnTab"
       />
+      <div v-else-if="searching" class="no-match">
+        <span><strong>{{ query }}</strong>에 맞는 항목이 없습니다</span>
+      </div>
       <EmptyState
         v-else
         :tab-name="tab?.name || ''"
@@ -693,7 +815,10 @@ watch(
     <!-- 푸터 -->
     <footer class="footer" :inert="overlay !== null">
       <span class="status" data-tauri-drag-region>
-        <template v-if="editing">끌어서 순서 변경 · 눌러서 이름 수정</template>
+        <template v-if="searching">
+          {{ matches.length }}개 찾음
+        </template>
+        <template v-else-if="editing">끌어서 순서 변경 · 눌러서 이름 수정</template>
         <template v-else-if="items.length">
           {{ items.length }}개 · 끌어다 놓아 추가
         </template>
@@ -880,6 +1005,37 @@ watch(
   padding: 0 var(--space-2) 0 var(--space-1);
   border-bottom: 0;
   border-right: 1px solid rgb(var(--line) / var(--divider-alpha));
+}
+
+.search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: center;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: var(--radius-control);
+  background: rgb(var(--tile) / var(--surface-alpha));
+  border: 1px solid rgb(var(--accent) / 0.55);
+  outline: none;
+  font-size: var(--fs-caption);
+}
+.search-input::placeholder {
+  color: rgb(var(--text-faint));
+}
+
+.no-match {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: var(--space-4);
+  text-align: center;
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  color: rgb(var(--text-faint));
+}
+.no-match strong {
+  color: rgb(var(--text-item));
+  font-weight: 700;
 }
 
 .head-btn {

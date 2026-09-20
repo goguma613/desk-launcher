@@ -15,6 +15,7 @@ const emit = defineEmits(["close", "remove", "move-to-tab", "relocate"]);
 
 const confirming = ref(false);
 const nameInput = ref(null);
+const targetTab = ref(props.currentTabId);
 
 // 열자마자 이름을 고칠 수 있게 합니다. 시트를 연 이유가 대개 그것입니다.
 onMounted(() => {
@@ -71,14 +72,20 @@ function setIcon(icon) {
 
     <section v-if="tabs.length > 1">
       <label class="field-label" for="item-tab">탭 옮기기</label>
-      <select
-        id="item-tab"
-        class="text-input"
-        :value="currentTabId"
-        @change="emit('move-to-tab', $event.target.value)"
-      >
-        <option v-for="t in tabs" :key="t.id" :value="t.id">{{ t.name }}</option>
-      </select>
+      <div class="move-row">
+        <!-- 고르는 즉시 옮기면 목록을 훑다가 실수합니다. 버튼을 눌러야 적용됩니다. -->
+        <select id="item-tab" v-model="targetTab" class="text-input">
+          <option v-for="t in tabs" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </select>
+        <button
+          class="btn"
+          :disabled="targetTab === currentTabId"
+          @click="emit('move-to-tab', targetTab)"
+        >
+          옮기기
+        </button>
+      </div>
+      <p class="hint">타일을 탭 위로 끌어다 놓아도 됩니다.</p>
     </section>
 
     <template #footer>
@@ -140,6 +147,26 @@ section {
   margin-right: auto;
   font-size: var(--fs-caption);
   color: rgb(var(--text-dim));
+}
+
+.move-row {
+  display: flex;
+  gap: var(--space-2);
+}
+.move-row .text-input {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+}
+.move-row .btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--fs-caption);
+  color: rgb(var(--text-faint));
 }
 
 select.text-input {

@@ -16,7 +16,7 @@ const props = defineProps({
   missing: { type: Object, default: () => new Set() },
 });
 
-const emit = defineEmits(["open", "edit", "remove", "move"]);
+const emit = defineEmits(["open", "edit", "remove", "move", "over-tab", "drop-on-tab"]);
 
 const rowMode = computed(() => props.columns === 0);
 const gridEl = ref(null);
@@ -46,6 +46,8 @@ const drag = reactive({
 });
 
 let pendingIndex = -1;
+/** 드래그 중 커서가 올라가 있는 탭. 없으면 빈 문자열 */
+let overTab = "";
 let startX = 0;
 let startY = 0;
 let suppressClick = false;
@@ -103,7 +105,18 @@ function onPointerMove(e) {
 
   drag.x = e.clientX;
   drag.y = e.clientY;
-  drag.to = nearestIndex(e.clientX, e.clientY);
+
+  // 탭 위로 끌어올리면 순서 변경이 아니라 탭 이동입니다.
+  // 미리보기 카드는 pointer-events: none 이라 판정을 가리지 않습니다.
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const tabEl = under && under.closest ? under.closest("[data-tab-id]") : null;
+  const next = tabEl ? tabEl.getAttribute("data-tab-id") : "";
+  if (next !== overTab) {
+    overTab = next;
+    emit("over-tab", overTab);
+  }
+
+  drag.to = overTab ? -1 : nearestIndex(e.clientX, e.clientY);
 }
 
 function onPointerUp() {
@@ -112,7 +125,9 @@ function onPointerUp() {
   window.removeEventListener("pointercancel", onPointerUp);
 
   if (drag.active) {
-    if (drag.to >= 0 && drag.to !== drag.from) {
+    if (overTab) {
+      emit("drop-on-tab", overTab, props.items[drag.from]);
+    } else if (drag.to >= 0 && drag.to !== drag.from) {
       emit("move", drag.from, drag.to);
     }
     // 드래그 직후 발생하는 click을 한 번 무시합니다.
@@ -126,6 +141,10 @@ function onPointerUp() {
   drag.from = -1;
   drag.to = -1;
   pendingIndex = -1;
+  if (overTab) {
+    overTab = "";
+    emit("over-tab", "");
+  }
 }
 
 function onTileClick(item) {
