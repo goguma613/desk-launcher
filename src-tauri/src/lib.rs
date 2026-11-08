@@ -159,7 +159,7 @@ mod display_watch {
 // 창 위치 / 크기
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct WorkArea {
     x: f64,
@@ -167,6 +167,38 @@ struct WorkArea {
     width: f64,
     height: f64,
     scale: f64,
+    /// 이 영역이 속한 모니터 이름 (Windows 장치 이름, 예: \\.\DISPLAY1)
+    monitor: String,
+}
+
+/// 런처를 띄울 모니터의 작업 영역. 단위는 그 모니터 배율 기준 논리 픽셀.
+///
+/// 예전에는 "지금 창이 걸쳐 있는 모니터"를 썼다. 그러면 창을 옆 모니터로
+/// 끌어 옮긴 뒤 다시 배치할 때 주 모니터 기준 보정값이 옆 모니터에 적용돼
+/// 가장자리로 튀었고, 재시작하면 주 모니터로 돌아갔다. 이제 설정에 저장된
+/// 모니터를 쓰고, 없으면(빈 값 · 연결 해제) 주 모니터를 쓴다.
+fn work_area_for(window: &Window, monitor: &str) -> Result<WorkArea, String> {
+    let monitors = window.available_monitors().unwrap_or_default();
+    let chosen = monitors
+        .iter()
+        .find(|m| !monitor.is_empty() && m.name().map(|n| n == monitor).unwrap_or(false))
+        .cloned()
+        .or_else(|| window.primary_monitor().ok().flatten())
+        .or_else(|| window.current_monitor().ok().flatten());
+
+    if let Some(m) = chosen {
+        let scale = m.scale_factor();
+        let wa = m.work_area();
+        return Ok(WorkArea {
+            x: wa.position.x as f64 / scale,
+            y: wa.position.y as f64 / scale,
+            width: wa.size.width as f64 / scale,
+            height: wa.size.height as f64 / scale,
+            scale,
+            monitor: m.name().cloned().unwrap_or_default(),
+        });
+    }
+    work_area_logical(window)
 }
 
 fn work_area_logical(window: &Window) -> Result<WorkArea, String> {
@@ -182,6 +214,7 @@ fn work_area_logical(window: &Window) -> Result<WorkArea, String> {
                 width: w as f64 / scale,
                 height: h as f64 / scale,
                 scale,
+                monitor: String::new(),
             });
         }
     }
@@ -199,12 +232,58 @@ fn work_area_logical(window: &Window) -> Result<WorkArea, String> {
         width: size.width as f64 / scale,
         height: size.height as f64 / scale,
         scale,
+        monitor: monitor.name().cloned().unwrap_or_default(),
     })
 }
 
 #[tauri::command]
-fn work_area(window: Window) -> Result<WorkArea, String> {
-    work_area_logical(&window)
+fn work_area(window: Window, monitor: Option<String>) -> Result<WorkArea, String> {
+    work_area_for(&window, monitor.as_deref().unwrap_or(""))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MonitorInfo {
+    name: String,
+    width: u32,
+    height: u32,
+    primary: bool,
+}
+
+/// 설정 창의 「표시할 모니터」 목록
+#[tauri::command]
+fn list_monitors(window: Window) -> Vec<MonitorInfo> {
+    let primary = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .and_then(|m| m.name().cloned())
+        .unwrap_or_default();
+    window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let name = m.name().cloned().unwrap_or_default();
+            MonitorInfo {
+                primary: name == primary,
+                width: m.size().width,
+                height: m.size().height,
+                name,
+            }
+        })
+        .collect()
+}
+
+/// 창이 지금 걸쳐 있는 모니터 이름. 사용자가 옆 모니터로 끌어 옮겼는지 볼 때 쓴다.
+#[tauri::command]
+fn current_monitor_name(window: Window) -> String {
+    window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .and_then(|m| m.name().cloned())
+        .unwrap_or_default()
 }
 
 #[derive(Serialize)]
@@ -234,12 +313,13 @@ fn place_window(
     height: f64,
     off_x: f64,
     off_y: f64,
+    monitor: Option<String>,
 ) -> Result<Placement, String> {
     // 작업표시줄 위 8px 간격은 프런트엔드가 그림자 자리(pad.bottom)로 잡아
     // 창 높이에 이미 포함되어 있다. 여기서 또 띄우면 16px이 된다.
     const BOTTOM_GAP: f64 = 0.0;
 
-    let area = work_area_logical(&window)?;
+    let area = work_area_for(&window, monitor.as_deref().unwrap_or(""))?;
     let w = width.min(area.width).max(160.0);
     let h = height.min(area.height).max(80.0);
 
@@ -262,11 +342,22 @@ fn place_window(
     let x = (base_x + off_x).clamp(area.x, area.x + area.width - w);
     let y = (base_y + off_y).clamp(area.y, area.y + area.height - h);
 
+    // 대상 모니터의 배율로 물리 픽셀을 직접 계산한다. 논리 단위로 넘기면 Tauri가
+    // 창이 "지금 있는" 모니터의 배율로 바꿔서, 배율이 다른 모니터로 옮길 때 어긋난다.
+    // 먼저 옮기고 크기를 잡는다. 모니터를 넘어가며 배율이 바뀌면 프런트엔드가
+    // display-changed를 받아 한 번 더 맞춘다.
+    let s = area.scale;
     window
-        .set_size(tauri::LogicalSize::new(w, h))
+        .set_position(tauri::PhysicalPosition::new(
+            (x * s).round() as i32,
+            (y * s).round() as i32,
+        ))
         .map_err(|e| e.to_string())?;
     window
-        .set_position(tauri::LogicalPosition::new(x, y))
+        .set_size(tauri::PhysicalSize::new(
+            (w * s).round() as u32,
+            (h * s).round() as u32,
+        ))
         .map_err(|e| e.to_string())?;
 
     Ok(Placement {
@@ -751,6 +842,21 @@ fn summon_window(app: &AppHandle) {
         .unwrap_or(false);
 
     if pinned {
+        // 불러낸 상태에서 한 번 더 누르면 제자리(맨 아래)로 돌려보낸다.
+        // 다른 곳을 클릭해야만 내려가면 단축키 하나로 끝나지 않는다.
+        let base = win.as_ref().window();
+        if is_surfaced(&base) && win.is_focused().unwrap_or(false) {
+            if let Some(flag) = app.try_state::<Surfaced>() {
+                if let Ok(mut v) = flag.0.lock() {
+                    *v = false;
+                }
+            }
+            // 숨겼다가 활성화 없이 다시 보이면 포커스가 바로 뒤 창으로 넘어간다.
+            // 맨 아래로 내리기만 하면 키보드 입력이 보이지 않는 위젯에 남는다.
+            let _ = win.hide();
+            restore_pinned(&base);
+            return;
+        }
         let _ = win.unminimize();
         let _ = win.show();
         if let Some(flag) = app.try_state::<Surfaced>() {
@@ -791,8 +897,8 @@ fn hide_window(window: Window) -> Result<(), String> {
 /// 설정은 런처 패널과 별개의 창이다. 설정을 바꾸는 동안 런처가 그대로
 /// 보여야 프리셋·모드 변경이 바로 눈에 들어온다.
 #[tauri::command]
-fn open_settings(app: AppHandle) -> Result<(), String> {
-    show_settings(&app)
+fn open_settings(app: AppHandle, request: Option<serde_json::Value>) -> Result<(), String> {
+    show_settings_with(&app, request.unwrap_or(serde_json::Value::Null))
 }
 
 /// 설정 창은 tauri.conf.json에 선언해 두고 시작할 때 숨긴 채로 만듭니다.
@@ -801,6 +907,15 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
 /// 제대로 붙지 않아 빈 창이 떴습니다. 런처 창과 같은 경로(설정 파일 선언)로
 /// 만들면 그 문제가 없고, 여는 속도도 빠릅니다.
 fn show_settings(app: &AppHandle) -> Result<(), String> {
+    show_settings_with(app, serde_json::Value::Null)
+}
+
+/// `request`가 있으면 설정 창이 첫 화면 대신 그 화면으로 열린다.
+///   { "view": "item", "id": "<항목 id>" }  항목의 아이콘 · 주소 편집
+///   { "view": "link", "tabId": "<탭 id>" }   웹 링크 추가
+/// 런처 창 안에서 이 화면들을 띄우면 하단 가로 바(높이 96px)가 위로 크게
+/// 늘어났다 줄어든다. 별도 창인 설정 창에서 열면 런처 크기가 그대로다.
+fn show_settings_with(app: &AppHandle, request: serde_json::Value) -> Result<(), String> {
     let win = app
         .get_webview_window("settings")
         .ok_or_else(|| "설정 창이 없습니다".to_string())?;
@@ -808,8 +923,8 @@ fn show_settings(app: &AppHandle) -> Result<(), String> {
     let _ = win.unminimize();
     win.show().map_err(|e| e.to_string())?;
     let _ = win.set_focus();
-    // 다시 열 때는 항상 첫 화면부터
-    let _ = app.emit_to("settings", "launcher://settings-shown", ());
+    // 요청이 없으면 첫 화면부터
+    let _ = app.emit_to("settings", "launcher://settings-shown", request);
     Ok(())
 }
 
@@ -972,6 +1087,8 @@ pub fn run() {
             quarantine_state,
             open_config_dir,
             work_area,
+            list_monitors,
+            current_monitor_name,
             place_window,
             set_layer,
             set_shortcut,

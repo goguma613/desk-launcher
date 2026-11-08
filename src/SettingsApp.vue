@@ -1,9 +1,12 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, emitTo, listen } from "@tauri-apps/api/event";
 
 import ShortcutInput from "./components/ShortcutInput.vue";
+import ItemEditor from "./components/ItemEditor.vue";
+import Sheet from "./components/Sheet.vue";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { UI_ICONS } from "./icons";
 import { PRESETS, MODES } from "./layout";
 import {
@@ -16,14 +19,16 @@ import {
   addTab,
   removeTab,
   moveTab,
+  addItems,
+  removeItem,
   MAX_TABS,
 } from "./store";
-import { refreshAll } from "./extractedIcons";
+import { prefetch, refreshAll } from "./extractedIcons";
 import { getVersion } from "@tauri-apps/api/app";
 import { findUpdate } from "./updater";
 
 const ready = ref(false);
-/** 'main' | 'tabs' */
+/** 'main' | 'tabs' | 'item'(항목 편집) | 'link'(웹 링크 추가) */
 const view = ref("main");
 const confirmTabId = ref("");
 const busy = ref("");
@@ -169,7 +174,175 @@ function resetPosition() {
   emitTo("main", "launcher://reset-position").catch((e) => console.error(e));
 }
 
-function close() {
+/* ---------------------------------------------------------------------------
+   모니터
+   --------------------------------------------------------------------------- */
+
+const monitors = ref([]);
+
+async function loadMonitors() {
+  try {
+    monitors.value = await invoke("list_monitors");
+  } catch {
+    monitors.value = [];
+  }
+}
+
+/** \\.\DISPLAY2 → 「모니터 2」 */
+function monitorLabel(m, i) {
+  const n = (m.name.match(/(\d+)\s*$/) || [])[1] || String(i + 1);
+  return `모니터 ${n}`;
+}
+
+/* ---------------------------------------------------------------------------
+   항목 편집 · 웹 링크 추가 — 런처가 요청해서 열 때
+   ---------------------------------------------------------------------------
+   런처 안에 시트로 띄우면 하단 가로 바가 시트를 담느라 위로 크게 늘어났습니다.
+   설정 창은 별도 창이라 여기서 열면 런처 크기가 그대로입니다.
+   요청으로 열었으면 끝낼 때 창도 닫아 런처로 바로 돌아가게 합니다.
+   --------------------------------------------------------------------------- */
+
+const editId = ref("");
+const editMissing = ref(false);
+const editOwner = computed(
+  () => state.tabs.find((t) => t.items.some((it) => it.id === editId.value)) || null
+);
+const editItem = computed(
+  () => editOwner.value?.items.find((it) => it.id === editId.value) || null
+);
+
+const linkTabId = ref("");
+const linkUrl = ref("");
+const linkName = ref("");
+const linkError = ref("");
+
+let openedByRequest = false;
+
+async function applyRequest(req) {
+  confirmTabId.value = "";
+  openedByRequest = false;
+
+  if (req && req.view === "item" && req.id) {
+    editId.value = req.id;
+    if (!editItem.value) {
+      view.value = "main";
+      return;
+    }
+    view.value = "item";
+    openedByRequest = true;
+    // 고치는 동안 런처가 저장해도 덮어쓰지 않도록 (store.holdSync 참고)
+    holdSync();
+    editMissing.value = false;
+    const item = editItem.value;
+    prefetch([item.path]);
+    if (item.kind !== "url") {
+      try {
+        const [info] = await invoke("inspect_paths", { paths: [item.path] });
+        editMissing.value = !info.exists;
+      } catch {
+        /* 확인 못 하면 표시하지 않습니다 */
+      }
+    }
+    return;
+  }
+
+  if (req && req.view === "link") {
+    linkTabId.value = state.tabs.some((t) => t.id === req.tabId)
+      ? req.tabId
+      : state.activeTabId;
+    linkUrl.value = "";
+    linkName.value = "";
+    linkError.value = "";
+    view.value = "link";
+    openedByRequest = true;
+    await nextTick();
+    document.getElementById("link-url")?.focus();
+    return;
+  }
+
+  view.value = "main";
+}
+
+async function finishRequest() {
+  const closeAfter = openedByRequest;
+  const wasEditing = view.value === "item";
+  openedByRequest = false;
+  await flushSave();
+  if (wasEditing) await releaseSync();
+  editId.value = "";
+  view.value = "main";
+  if (closeAfter) invoke("close_settings");
+}
+
+function onEditRemove() {
+  const owner = editOwner.value;
+  if (owner) removeItem(owner.id, editId.value);
+  finishRequest();
+}
+
+function onEditMove(tabId) {
+  const from = editOwner.value;
+  const to = state.tabs.find((t) => t.id === tabId);
+  const item = editItem.value;
+  if (!from || !to || !item || from.id === to.id) return;
+  if (to.items.some((it) => it.path === item.path)) return;
+  from.items.splice(from.items.indexOf(item), 1);
+  to.items.push(item);
+  finishRequest();
+}
+
+/** 경로가 사라진 항목의 대상만 바꿉니다. 이름 · 아이콘은 그대로 둡니다. */
+async function onEditRelocate() {
+  const item = editItem.value;
+  if (!item) return;
+  try {
+    const picked = await openDialog({
+      multiple: false,
+      directory: item.kind === "folder",
+      title: item.name + " 의 새 위치 고르기",
+    });
+    if (!picked) return;
+    const [info] = await invoke("inspect_paths", { paths: [picked] });
+    item.path = info.path;
+    item.ext = info.ext;
+    if (info.isDir) item.kind = "folder";
+    editMissing.value = !info.exists;
+    prefetch([info.path]);
+  } catch (e) {
+    console.error("경로 바꾸기 실패", e);
+  }
+}
+
+async function addLinkFromSettings() {
+  linkError.value = "";
+  let url = linkUrl.value.trim();
+  if (!url) {
+    linkError.value = "주소를 입력하세요";
+    return;
+  }
+  if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    linkError.value = "주소 형식이 올바르지 않습니다";
+    return;
+  }
+  const added = addItems(
+    [{ path: url, name: linkName.value.trim() || host, isDir: false, ext: "" }],
+    linkTabId.value
+  );
+  if (!added) {
+    linkError.value = "이 탭에 이미 있는 링크입니다";
+    return;
+  }
+  await finishRequest();
+}
+
+async function close() {
+  if (view.value === "item") await releaseSync();
+  openedByRequest = false;
+  editId.value = "";
   flushSave().finally(() => invoke("close_settings"));
 }
 
@@ -217,6 +390,7 @@ onMounted(async () => {
     .catch(() => {});
 
   checkForUpdate();
+  loadMonitors();
 
   unlisteners.push(
     await listen("launcher://state-saved", async () => {
@@ -228,12 +402,13 @@ onMounted(async () => {
 
   // 창은 닫히지 않고 숨겨졌다가 다시 뜹니다. 열 때마다 첫 화면으로.
   unlisteners.push(
-    await listen("launcher://settings-shown", async () => {
-      view.value = "main";
-      confirmTabId.value = "";
+    await listen("launcher://settings-shown", async (e) => {
       await rehydrate();
       applyTheme();
       applyOpacity();
+      // 런처가 특정 화면(항목 편집 · 링크 추가)을 요청했으면 그 화면으로
+      await applyRequest(e.payload);
+      loadMonitors();
       // 열면 이미 결과가 나와 있게. 「확인」을 누를 필요가 없습니다.
       checkForUpdate();
     })
@@ -252,6 +427,7 @@ onMounted(async () => {
 function onKeydown(e) {
   if (e.key !== "Escape") return;
   if (view.value === "tabs") view.value = "main";
+  else if (view.value === "item" || view.value === "link") finishRequest();
   else close();
 }
 
@@ -311,8 +487,48 @@ watch(() => state.settings.opacity, applyOpacity);
             <span class="card-hint">{{ p.hint }}</span>
           </button>
         </div>
+        <div v-if="state.settings.preset === 'bottom'" class="seg-row">
+          <span class="seg-label">하단 바 폭</span>
+          <div class="seg">
+            <button
+              :class="{ on: !state.settings.barFit }"
+              @click="state.settings.barFit = false"
+            >
+              화면 전체
+            </button>
+            <button
+              :class="{ on: state.settings.barFit }"
+              title="항목 수에 맞춘 폭으로 가운데에 놓습니다"
+              @click="state.settings.barFit = true"
+            >
+              항목에 맞춤
+            </button>
+          </div>
+        </div>
+        <div v-if="monitors.length > 1" class="seg-row">
+          <span class="seg-label">모니터</span>
+          <div class="seg">
+            <button
+              :class="{ on: !state.settings.monitor }"
+              title="주 모니터가 바뀌면 따라갑니다"
+              @click="state.settings.monitor = ''"
+            >
+              주 모니터
+            </button>
+            <button
+              v-for="(m, i) in monitors"
+              :key="m.name"
+              :class="{ on: state.settings.monitor === m.name }"
+              :title="`${m.width}×${m.height}${m.primary ? ' · 지금 주 모니터' : ''}`"
+              @click="state.settings.monitor = m.name"
+            >
+              {{ monitorLabel(m, i) }}
+              <em>{{ m.width }}×{{ m.height }}</em>
+            </button>
+          </div>
+        </div>
         <div class="place-row">
-          <p class="note">패널은 빈 곳을 끌어 옮길 수 있습니다.</p>
+          <p class="note">패널은 빈 곳을 끌어 옮길 수 있습니다. 옆 모니터로 끌면 그 모니터에 자리를 잡습니다.</p>
           <button class="btn" @click="resetPosition">위치 초기화</button>
         </div>
       </section>
@@ -431,7 +647,7 @@ watch(() => state.settings.opacity, applyOpacity);
     </div>
 
     <!-- ===================== 탭 편집 ===================== -->
-    <div v-else class="content">
+    <div v-else-if="view === 'tabs'" class="content">
       <p class="note top">
         탭은 최대 {{ MAX_TABS }}개입니다. 이름은 한글 2~6자를 권합니다. 길면 탭
         바에서 말줄임됩니다. <strong>탭을 지우면 그 안의 항목도 함께 사라집니다.</strong>
@@ -499,6 +715,58 @@ watch(() => state.settings.opacity, applyOpacity);
       </button>
     </div>
 
+    <!-- ===================== 항목 편집 (런처 요청) ===================== -->
+    <ItemEditor
+      v-if="view === 'item' && editItem && editOwner"
+      :item="editItem"
+      :tabs="state.tabs"
+      :current-tab-id="editOwner.id"
+      :missing="editMissing"
+      @close="finishRequest"
+      @remove="onEditRemove"
+      @move-to-tab="onEditMove"
+      @relocate="onEditRelocate"
+    />
+
+    <!-- ===================== 웹 링크 추가 (런처 요청) ===================== -->
+    <Sheet v-else-if="view === 'link'" title="웹 링크 추가" @close="finishRequest">
+      <section>
+        <label class="field-label" for="link-url">주소</label>
+        <input
+          id="link-url"
+          v-model="linkUrl"
+          class="text-input"
+          type="text"
+          placeholder="example.com"
+          spellcheck="false"
+          @keydown.enter="addLinkFromSettings"
+        />
+      </section>
+      <section>
+        <label class="field-label" for="link-name">이름</label>
+        <input
+          id="link-name"
+          v-model="linkName"
+          class="text-input"
+          type="text"
+          maxlength="60"
+          placeholder="비워두면 주소에서 가져옵니다"
+          @keydown.enter="addLinkFromSettings"
+        />
+      </section>
+      <section v-if="state.tabs.length > 1">
+        <label class="field-label" for="link-tab">넣을 탭</label>
+        <select id="link-tab" v-model="linkTabId" class="text-input">
+          <option v-for="t in state.tabs" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </select>
+      </section>
+      <p v-if="linkError" class="err">{{ linkError }}</p>
+      <template #footer>
+        <button class="btn" @click="finishRequest">취소</button>
+        <button class="btn primary" @click="addLinkFromSettings">추가</button>
+      </template>
+    </Sheet>
+
     <!-- ===================== 창 푸터 ===================== -->
     <footer class="winfoot">
       <button class="linkish" @click="openConfigDir">설정 파일 폴더</button>
@@ -535,6 +803,8 @@ watch(() => state.settings.opacity, applyOpacity);
 
 <style scoped>
 .win {
+  /* 항목 편집 · 링크 추가 시트가 이 창 안에 꽉 차도록 */
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -1004,6 +1274,55 @@ section {
   height: 14px;
 }
 
+.seg-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.seg-label {
+  flex: 0 0 72px;
+  font-size: var(--fs-caption);
+  color: rgb(var(--text-dim));
+}
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: 3px;
+  border-radius: var(--radius-control);
+  background: rgb(var(--tile) / var(--surface-alpha));
+}
+.seg button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: calc(var(--radius-control) - 2px);
+  font-size: var(--fs-caption);
+  color: rgb(var(--text-dim));
+  transition: background var(--dur-hover) var(--ease), color var(--dur-hover) var(--ease);
+}
+.seg button:hover {
+  color: rgb(var(--text));
+}
+.seg button.on {
+  background: rgb(var(--accent) / var(--accent-soft-alpha));
+  color: rgb(var(--accent-ink));
+  font-weight: 700;
+}
+.seg button em {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 10px;
+  color: rgb(var(--text-faint));
+}
+select.text-input {
+  appearance: none;
+  cursor: pointer;
+}
+
 .place-row {
   display: flex;
   align-items: center;
@@ -1021,6 +1340,13 @@ section {
   line-height: 1.6;
   color: rgb(var(--text-faint));
 }
+.err {
+  margin: var(--space-2) 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  color: rgb(var(--danger));
+}
+
 .note.top {
   margin: 0 0 var(--space-3);
 }

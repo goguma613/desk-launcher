@@ -58,9 +58,12 @@ const PAD = {
   right: { top: 24, right: 0, bottom: 24, left: 26 },
   bottom: { top: 0, right: 0, bottom: 8, left: 0 },
   center: { top: 30, right: 28, bottom: 30, left: 28 },
+  // 하단 바 「항목에 맞춤」: 화면 가장자리에 붙지 않으니 좌우 · 위에도 그림자 자리
+  bottomFit: { top: 22, right: 28, bottom: 8, left: 28 },
 };
 
 export function shadowPad(preset = state.settings.preset) {
+  if (preset === "bottom" && state.settings.barFit) return PAD.bottomFit;
   return PAD[preset] || PAD.right;
 }
 
@@ -107,6 +110,11 @@ const SPEC = {
 };
 
 const GAP = 4; // --tile-gap
+const PANEL_PAD = 10; // --panel-pad, 항목 영역 좌우
+// 「항목에 맞춤」에서 빈 탭일 때 항목 영역 폭. 점선 안내가 한 줄로 들어갑니다.
+const FIT_EMPTY_BODY = 380;
+// 「항목에 맞춤」 최소 폭. 항목이 한두 개면 너무 짧아 바처럼 보이지 않습니다.
+const FIT_MIN = 520;
 const BORDER = 2; // 패널 위아래 테두리 1px씩
 // 빈 탭일 때 항목 영역 높이. 점선 박스 안에 아이콘 22 + 안내 2줄 + 버튼 24가
 // 들어가고 박스 패딩 10과 격자 패딩 12가 위아래로 붙습니다.
@@ -183,6 +191,26 @@ export function windowSize(area, countOverride) {
     width: sp.width + padX,
     height: clamp(panel, 200, cap) + padY,
   };
+}
+
+/**
+ * 하단 바 「항목에 맞춤」 창 폭.
+ *
+ * 탭 바 · 푸터 폭은 탭 이름에 따라 달라서 호출부가 DOM에서 잰 값을 넘깁니다.
+ * 항목 영역은 **가장 많은 탭** 기준입니다. 탭마다 제 항목 수로 맞추면 탭을
+ * 바꿀 때마다 바 폭이 늘었다 줄었다 합니다. 검색 결과 수도 따르지 않습니다.
+ */
+export function fitBarWidth(area, headW, footW) {
+  const sp = SPEC.bottom;
+  const pad = shadowPad("bottom");
+  const most = state.tabs.reduce((max, t) => Math.max(max, t.items.length), 0);
+  const body =
+    most > 0 ? most * sp.cellW + (most - 1) * GAP + PANEL_PAD * 2 : FIT_EMPTY_BODY;
+  // 반올림 · 탭 끝 흐림 처리(mask 10px) 몫으로 약간 여유를 둡니다. 모자라면
+  // 탭 이름이 잘리고 항목 아래에 가로 스크롤바가 생깁니다.
+  const FIT_SLACK = 16;
+  const panel = Math.max(FIT_MIN, Math.ceil(headW + body + footW + BORDER + FIT_SLACK));
+  return Math.min(area.width, panel + pad.left + pad.right);
 }
 
 export function clamp(v, lo, hi) {

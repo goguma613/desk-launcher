@@ -34,6 +34,7 @@ const emit = defineEmits([
   "drop-on-tab",
   "rename-commit",
   "rename-cancel",
+  "hover",
 ]);
 
 /* ---------------------------------------------------------------------------
@@ -233,6 +234,7 @@ let tipTimer = null;
 
 function onTileEnter(e, item) {
   hideTip();
+  emit("hover", item);
   const el = e.currentTarget;
   tipTimer = setTimeout(() => {
     const nameEl = el.querySelector(".name");
@@ -259,6 +261,11 @@ function onTileEnter(e, item) {
     );
     tip.show = true;
   }, 600);
+}
+
+function onTileLeave() {
+  hideTip();
+  emit("hover", null);
 }
 
 function hideTip() {
@@ -300,7 +307,7 @@ onBeforeUnmount(() => {
       ]"
       @pointerdown="onPointerDown($event, i)"
       @pointerenter="onTileEnter($event, item)"
-      @pointerleave="hideTip"
+      @pointerleave="onTileLeave"
       @click="onTileClick(item)"
       @keydown.enter.self.prevent="onTileClick(item)"
       @contextmenu.prevent="hideTip(); emit('menu', item, $event)"

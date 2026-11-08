@@ -15,11 +15,9 @@ import {
 import TabBar from "./components/TabBar.vue";
 import ItemGrid from "./components/ItemGrid.vue";
 import EmptyState from "./components/EmptyState.vue";
-import ItemEditor from "./components/ItemEditor.vue";
-import Sheet from "./components/Sheet.vue";
 
 import { UI_ICONS } from "./icons";
-import { cellHeight, clamp, shadowPad, spec, windowSize } from "./layout";
+import { cellHeight, clamp, fitBarWidth, shadowPad, spec, windowSize } from "./layout";
 import {
   state,
   hydrate,
@@ -54,10 +52,7 @@ const missing = ref(new Set());
 
 /** null | 'item' | 'link' */
 const overlay = ref(null);
-const editingItem = ref(null);
 
-const linkUrl = ref("");
-const linkName = ref("");
 
 const area = ref({ x: 0, y: 0, width: 1920, height: 1040, scale: 1 });
 const basePos = ref({ x: 0, y: 0 });
@@ -353,25 +348,22 @@ let placing = false;
 async function applyLayout() {
   placing = true;
   try {
-    area.value = await invoke("work_area");
     const s = state.settings;
+    area.value = await invoke("work_area", { monitor: s.monitor || "" });
     const size = windowSize(
       area.value,
       filtering.value ? matches.value.length : undefined
     );
-
-    // 항목 편집 시트가 열려 있으면 최소한의 세로를 확보합니다.
-    const height = overlay.value
-      ? clamp(Math.max(size.height, 440), 200, area.value.height * 0.82)
-      : size.height;
+    if (fitBar.value) size.width = await measureFitWidth();
 
     const off = s.offsets[s.preset] || { x: 0, y: 0 };
     const placed = await invoke("place_window", {
       preset: s.preset,
       width: size.width,
-      height,
+      height: size.height,
       offX: off.x,
       offY: off.y,
+      monitor: s.monitor || "",
     });
     basePos.value = { x: placed.baseX, y: placed.baseY };
   } catch (e) {
@@ -383,12 +375,31 @@ async function applyLayout() {
   }
 }
 
+/* 하단 바 「항목에 맞춤」 — 독처럼 내용만큼의 폭으로 가운데에 놓습니다.
+   탭 이름 길이에 따라 탭 바 폭이 달라지므로 실제 DOM을 재서 더합니다. */
+const fitBar = computed(
+  () => state.settings.preset === "bottom" && state.settings.barFit === true
+);
+
+async function measureFitWidth() {
+  await nextTick();
+  const panel = document.querySelector(".panel");
+  const head = panel?.querySelector(".tabbar");
+  const strip = head?.querySelector(".tabs");
+  const foot = panel?.querySelector(".footer");
+  // 탭 바는 좁아지면 줄어들므로, 줄어든 만큼(넘친 폭)을 되돌려 더합니다.
+  const headW = head
+    ? head.offsetWidth + (strip ? strip.scrollWidth - strip.clientWidth : 0)
+    : 0;
+  const footW = foot ? foot.offsetWidth : 0;
+  return fitBarWidth(area.value, headW, footW);
+}
+
 let relayoutTimer = null;
 
 /** 디스플레이 변경 이벤트는 몰려서 들어옵니다. 마지막 것 하나만 처리합니다. */
 function scheduleRelayout() {
   if (relayoutTimer) clearTimeout(relayoutTimer);
-  if (updateTimer) clearInterval(updateTimer);
   relayoutTimer = setTimeout(() => {
     relayoutTimer = null;
     if (ready.value) applyLayout();
@@ -557,7 +568,7 @@ async function registerPaths(paths, tabId = state.activeTabId) {
 }
 
 /** 경로가 사라진 항목의 대상만 바꿉니다. 이름·아이콘은 그대로 둡니다. */
-async function relocateItem(item = editingItem.value) {
+async function relocateItem(item) {
   if (!item) return;
   try {
     const picked = await openDialog({
@@ -778,7 +789,7 @@ async function showAddMenu() {
     await popup([
       { text: "파일 · 프로그램 추가…", action: browseFiles },
       { text: "폴더 추가…", action: browseFolders },
-      { text: "웹 링크 추가…", action: () => openOverlay("link") },
+      { text: "웹 링크 추가…", action: openLinkAdder },
     ]);
   } catch (e) {
     console.error("메뉴 실패", e);
@@ -786,73 +797,27 @@ async function showAddMenu() {
   }
 }
 
-function openOverlay(kind, item = null) {
-  editingItem.value = item;
-  overlay.value = kind;
-  // 편집하는 동안에는 설정 창이 저장해도 즉시 반영하지 않습니다.
-  // 반영하면 지금 고치고 있는 값이 저장된 옛 값으로 되돌아갑니다.
-  holdSync();
-}
-
-function openEditor(item) {
-  // 검색 결과에서 열었다면 그 항목이 사는 탭으로 먼저 옮깁니다.
-  // 안 그러면 삭제·이동이 엉뚱한 탭에 적용됩니다.
-  const owner = state.tabs.find((t) =>
-    t.items.some((it) => it.id === item.id)
-  );
-  if (owner && owner.id !== state.activeTabId) state.activeTabId = owner.id;
+/* 아이콘 · 주소 편집과 웹 링크 추가는 설정 창에서 엽니다.
+   런처 안에 시트로 띄우면 하단 가로 바(높이 96px)가 그 시트를 담느라 위로
+   크게 늘어났다 줄어듭니다. 설정 창은 별도 창이라 런처 크기가 그대로입니다. */
+async function openEditor(item) {
   if (searching.value) closeSearch();
-  openOverlay("item", item);
+  await flushSave(); // 방금 바꾼 것을 설정 창이 읽을 수 있게
+  invoke("open_settings", { request: { view: "item", id: item.id } }).catch((e) =>
+    flash(`편집 창을 열지 못했습니다: ${e}`)
+  );
 }
 
-async function closeOverlay() {
-  const wasOpen = overlay.value !== null;
-  overlay.value = null;
-  editingItem.value = null;
-  linkUrl.value = "";
-  linkName.value = "";
+async function openLinkAdder() {
   await flushSave();
-  if (wasOpen) await releaseSync();
+  invoke("open_settings", {
+    request: { view: "link", tabId: state.activeTabId },
+  }).catch((e) => flash(`창을 열지 못했습니다: ${e}`));
 }
 
-function removeEditingItem() {
-  if (!editingItem.value) return;
-  removeItem(state.activeTabId, editingItem.value.id);
-  closeOverlay();
-}
-
-function moveItemToTab(targetTabId) {
-  const item = editingItem.value;
-  if (!item || targetTabId === state.activeTabId) return;
-  const from = state.tabs.find((t) => t.id === state.activeTabId);
-  const to = state.tabs.find((t) => t.id === targetTabId);
-  if (!from || !to) return;
-  const i = from.items.findIndex((it) => it.id === item.id);
-  if (i < 0) return;
-  const [moved] = from.items.splice(i, 1);
-  to.items.push(moved);
-  closeOverlay();
-  flash(`${to.name} 탭으로 옮겼습니다`);
-}
-
-async function addLink() {
-  let url = linkUrl.value.trim();
-  if (!url) return;
-  if (!/^https?:\/\//i.test(url)) url = "https://" + url;
-
-  let host = url;
-  try {
-    host = new URL(url).hostname;
-  } catch {
-    flash("주소 형식이 올바르지 않습니다");
-    return;
-  }
-
-  const added = addItems([
-    { path: url, name: linkName.value.trim() || host, isDir: false, ext: "" },
-  ]);
-  await closeOverlay();
-  flash(added ? "링크를 추가했습니다" : "이미 있는 링크입니다");
+/** 예전 시트용. 이제 런처 안에 시트는 없지만 Esc 처리 등에서 부릅니다. */
+async function closeOverlay() {
+  overlay.value = null;
 }
 
 function onAddTab() {
@@ -914,6 +879,10 @@ function fingerprint() {
     shortcut: s.shortcut,
     autostart: s.autostart,
     showNames: s.showNames,
+    monitor: s.monitor || "",
+    barFit: !!s.barFit,
+    // 독 폭은 탭 이름 길이에 따라 달라집니다
+    tabNames: fitBar.value ? state.tabs.map((t) => t.name).join("\u0000") : "",
     emptyTab: items.value.length === 0,
     itemCount: state.tabs.reduce((n, t) => n + t.items.length, 0),
     overlayOpen: overlay.value !== null,
@@ -941,6 +910,9 @@ async function applyChanged() {
   if (
     now.preset !== was.preset ||
     now.showNames !== was.showNames ||
+    now.monitor !== was.monitor ||
+    now.barFit !== was.barFit ||
+    now.tabNames !== was.tabNames ||
     now.emptyTab !== was.emptyTab ||
     now.itemCount !== was.itemCount ||
     now.overlayOpen !== was.overlayOpen ||
@@ -980,6 +952,7 @@ watch(
   () => state.activeTabId,
   () => {
     kbdIndex.value = -1;
+    hoveredItem.value = null;
   }
 );
 
@@ -1005,6 +978,9 @@ function isTextField(el) {
   );
 }
 
+/** 마우스를 올려 둔 항목. F2 · Delete가 키보드 선택이 없을 때 이걸 씁니다. */
+const hoveredItem = ref(null);
+
 /** 방향키 · Enter · 바로 검색. 처리했으면 true */
 function onNavKey(e) {
   if (overlay.value || renamingItemId.value || renamingTabId.value) return false;
@@ -1012,6 +988,16 @@ function onNavKey(e) {
   const inField = isTextField(e.target);
   if (inField && !inSearch) return false;
   if (e.ctrlKey || e.altKey || e.metaKey) return false;
+
+  // 탐색기와 같은 손버릇: F2 이름 바꾸기, Delete 삭제(되돌리기 가능)
+  if (!inField && (e.key === "F2" || e.key === "Delete")) {
+    const target = shown.value[kbdIndex.value] || hoveredItem.value;
+    if (!target) return false;
+    e.preventDefault();
+    if (e.key === "F2") startItemRename(target);
+    else onRemove(target);
+    return true;
+  }
 
   // 하단 가로 바는 한 줄이라 위아래도 옆으로 움직입니다.
   const rowStep = preset.value.cols || 1;
@@ -1077,6 +1063,34 @@ function onKeydown(e) {
   else if (state.settings.mode === "overlay") invoke("hide_window");
 }
 
+/* 옆 모니터로 끌어 옮기면 그 모니터를 기억하고 같은 배치 자리로 맞춥니다.
+   위치 보정값은 모니터마다 기준점이 달라 그대로 쓸 수 없어서 0으로 돌립니다. */
+let monitorTimer = null;
+
+async function checkMonitorMove() {
+  monitorTimer = null;
+  if (placing) return;
+  try {
+    const now = await invoke("current_monitor_name");
+    if (!now || now === area.value.monitor) return;
+    state.settings.monitor = now;
+    state.settings.offsets[state.settings.preset] = { x: 0, y: 0 };
+    // applyLayout은 monitor가 바뀐 것을 보고 watch에서 돕니다.
+    flash("이 모니터에 놓았습니다");
+  } catch (e) {
+    console.error("모니터 확인 실패", e);
+  }
+}
+
+/* 하단 바에서 항목이 넘치면 휠로 옆으로 넘깁니다 (탭 바와 같은 방식). */
+function onBodyWheel(e) {
+  if (axis.value !== "horizontal") return;
+  const el = e.currentTarget;
+  if (el.scrollWidth <= el.clientWidth) return;
+  e.preventDefault();
+  el.scrollLeft += e.deltaY || e.deltaX;
+}
+
 /** 마우스를 쓰기 시작하면 키보드 선택 표시는 걷어냅니다. */
 function onPointerDownAnywhere() {
   if (kbdIndex.value >= 0) kbdIndex.value = -1;
@@ -1104,6 +1118,11 @@ onMounted(async () => {
   prefetchAll();
   // 지운 항목의 캐시 PNG가 계속 쌓이지 않도록 시작할 때 한 번 치웁니다.
   pruneOrphans(state.tabs.flatMap((t) => t.items).map((it) => it.path));
+
+  // 웹폰트가 늦게 뜨면 탭 이름 폭이 달라집니다. 독 폭을 그 뒤에 다시 잽니다.
+  document.fonts?.ready.then(() => {
+    if (fitBar.value) scheduleRelayout();
+  });
 
   // 새 버전이 있으면 알려만 줍니다. 설치는 설정 창에서.
   pollUpdate();
@@ -1148,6 +1167,9 @@ onMounted(async () => {
   unlisteners.push(
     await getCurrentWindow().onMoved(async ({ payload }) => {
       if (placing || overlay.value) return;
+      // 끌기를 멈추면 어느 모니터에 놓였는지 봅니다 (checkMonitorMove)
+      if (monitorTimer) clearTimeout(monitorTimer);
+      monitorTimer = setTimeout(checkMonitorMove, 450);
       // 최소화되면 Windows가 창을 (-32000, -32000)으로 보냅니다. 끌어 옮긴 게
       // 아닌데 이걸 보정값으로 저장해서 하단 바가 왼쪽 위 구석에 붙었었습니다.
       if (payload.x <= -30000 || payload.y <= -30000) return;
@@ -1255,6 +1277,7 @@ watch(
     :data-preset="state.settings.preset"
     :data-mode="state.settings.mode"
     :data-axis="axis"
+    :data-fit="fitBar ? '' : null"
     :class="{ ready, editing, 'drop-on': dropActive }"
   >
     <!-- 탭 바 -->
@@ -1326,7 +1349,7 @@ watch(
     </header>
 
     <!-- 항목 격자 -->
-    <main class="body" :inert="overlay !== null">
+    <main class="body" :inert="overlay !== null" @wheel="onBodyWheel">
       <ItemGrid
         v-if="shown.length"
         :key="filtering ? 'search' : state.activeTabId"
@@ -1352,6 +1375,7 @@ watch(
         @move="onMove"
         @over-tab="dragOverTab = $event"
         @drop-on-tab="onDropOnTab"
+        @hover="hoveredItem = $event"
       />
       <div v-else-if="filtering" class="no-match">
         <span><strong>{{ query }}</strong>에 맞는 항목이 없습니다</span>
@@ -1440,51 +1464,6 @@ watch(
       </div>
     </Transition>
 
-    <!-- 항목 편집 -->
-    <Transition name="sheet">
-    <ItemEditor
-      v-if="overlay === 'item' && editingItem"
-      :item="editingItem"
-      :tabs="state.tabs"
-      :current-tab-id="state.activeTabId"
-      :missing="missing.has(editingItem.id)"
-      @close="closeOverlay"
-      @remove="removeEditingItem"
-      @move-to-tab="moveItemToTab"
-      @relocate="relocateItem"
-    />
-
-    <Sheet v-else-if="overlay === 'link'" title="웹 링크 추가" @close="closeOverlay">
-      <section>
-        <label class="field-label" for="link-url">주소</label>
-        <input
-          id="link-url"
-          v-model="linkUrl"
-          class="text-input"
-          type="text"
-          placeholder="example.com"
-          spellcheck="false"
-          @keydown.enter="addLink"
-        />
-      </section>
-      <section>
-        <label class="field-label" for="link-name">이름</label>
-        <input
-          id="link-name"
-          v-model="linkName"
-          class="text-input"
-          type="text"
-          maxlength="60"
-          placeholder="비워두면 주소에서 가져옵니다"
-          @keydown.enter="addLink"
-        />
-      </section>
-      <template #footer>
-        <button class="btn" @click="closeOverlay">취소</button>
-        <button class="btn primary" @click="addLink">추가</button>
-      </template>
-    </Sheet>
-    </Transition>
   </div>
   </div>
 </template>
@@ -1566,6 +1545,11 @@ watch(
   padding: 0 var(--space-2) 0 var(--space-1);
   border-bottom: 0;
   border-right: 1px solid rgb(var(--line) / var(--divider-alpha));
+}
+
+/* 하단 바 「항목에 맞춤」: 탭 바가 제 폭을 다 씁니다. 창 폭은 그만큼 잡습니다. */
+.panel[data-fit] .tabbar {
+  max-width: none;
 }
 
 .search-input {

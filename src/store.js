@@ -23,6 +23,10 @@ export function defaultSettings() {
     showNames: true,
     // 시안 기준 다크 .96 / 라이트 .97. 설정에서 조절합니다.
     opacity: 0.96,
+    // 띄울 모니터의 장치 이름. 빈 값이면 주 모니터.
+    monitor: "",
+    // 하단 바 폭. false = 화면 전체(시안), true = 항목에 맞춰 가운데(독)
+    barFit: false,
     // 프리셋 기본 위치에서 사용자가 끌어 옮긴 만큼의 보정값
     offsets: {
       right: { x: 0, y: 0 },
