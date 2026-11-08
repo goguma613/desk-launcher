@@ -454,8 +454,15 @@ async function applyShortcut() {
 async function applyAutostart() {
   try {
     const current = await isAutostartEnabled();
-    if (state.settings.autostart && !current) await enableAutostart();
-    else if (!state.settings.autostart && current) await disableAutostart();
+    if (state.settings.autostart) {
+      // 켜져 있어도 다시 등록합니다. 등록값에는 실행 파일 경로가 들어 있어서,
+      // 빌드 폴더에서 켰다가 설치본을 쓰거나 설치 위치가 바뀌면 옛 경로가 남아
+      // 자동 실행이 조용히 안 됩니다. enable은 지금 경로로 덮어씁니다.
+      // 개발 실행(npm run tauri dev)은 설치본과 같은 이름으로 등록되므로 건드리지 않습니다.
+      if (!current || !import.meta.env.DEV) await enableAutostart();
+    } else if (current) {
+      await disableAutostart();
+    }
   } catch (e) {
     console.error("자동 실행 설정 실패", e);
   }
@@ -929,6 +936,22 @@ function onAddTab() {
    경로 유효성 검사
    --------------------------------------------------------------------------- */
 
+/* 켤 때만 확인하면, 상시 떠 있는 동안 프로그램을 지우거나 외장 드라이브를 빼도
+   재시작 전까지 정상으로 보입니다. 창이 포커스를 받거나 불려 나올 때, 그리고
+   10분마다 다시 봅니다. 연결이 끊긴 네트워크 경로는 응답이 수십 초 걸릴 수
+   있어서, 확인이 겹치지 않게 하고 너무 잦지 않게 간격을 둡니다. */
+const RECHECK_GAP = 15 * 1000;
+const RECHECK_EVERY = 10 * 60 * 1000;
+let checking = false;
+let checkAgain = false;
+let lastCheck = 0;
+let recheckTimer = null;
+
+function recheckPaths() {
+  if (checking || Date.now() - lastCheck < RECHECK_GAP) return;
+  checkPaths();
+}
+
 async function checkPaths() {
   const all = state.tabs
     .flatMap((t) => t.items)
@@ -937,6 +960,12 @@ async function checkPaths() {
     missing.value = new Set();
     return;
   }
+  if (checking) {
+    checkAgain = true;
+    return;
+  }
+  checking = true;
+  lastCheck = Date.now();
   try {
     const infos = await invoke("inspect_paths", {
       paths: all.map((it) => it.path),
@@ -948,6 +977,13 @@ async function checkPaths() {
     missing.value = set;
   } catch (e) {
     console.error("경로 확인 실패", e);
+  } finally {
+    checking = false;
+    // 확인하는 사이 항목이 바뀌었으면 (추가 · 되돌리기 등) 한 번 더 봅니다.
+    if (checkAgain) {
+      checkAgain = false;
+      checkPaths();
+    }
   }
 }
 
@@ -1335,6 +1371,15 @@ onMounted(async () => {
   );
   unlisteners.push(await getCurrentWindow().onScaleChanged(scheduleRelayout));
 
+  // 사라진 항목 다시 확인 (recheckPaths 참고)
+  unlisteners.push(
+    await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) recheckPaths();
+    })
+  );
+  unlisteners.push(await listen("launcher://shown", () => recheckPaths()));
+  recheckTimer = setInterval(recheckPaths, RECHECK_EVERY);
+
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("pointerdown", onPointerDownAnywhere, true);
   window.addEventListener("beforeunload", flushSave);
@@ -1345,6 +1390,7 @@ onBeforeUnmount(() => {
   if (toastTimer) clearTimeout(toastTimer);
   if (relayoutTimer) clearTimeout(relayoutTimer);
   if (launchedTimer) clearTimeout(launchedTimer);
+  if (recheckTimer) clearInterval(recheckTimer);
   unlisteners.forEach((un) => {
     try {
       un();

@@ -774,6 +774,13 @@ fn save_state(app: AppHandle, window: Window, data: String) -> Result<(), String
         // 직전 판을 한 세대 남긴다. 되돌릴 구석이 하나는 있어야 한다.
         if path.exists() {
             let _ = fs::copy(&path, path.with_file_name("state.bak.json"));
+            // 위 한 세대는 몇 초 뒤 다음 저장에서 덮어써진다. 실수를 늦게 알아챘을 때를
+            // 위해 하루에 한 벌씩 따로 보관한다. 실패해도 저장은 계속한다.
+            if let Err(e) = backup::dir(&app)
+                .and_then(|d| backup::daily(&d, &path, backup::now_secs()))
+            {
+                eprintln!("자동 백업 실패: {e}");
+            }
         }
 
         // 저장 도중 전원이 끊겨도 기존 파일이 깨지지 않도록 임시 파일에 쓰고 교체한다.
@@ -810,6 +817,253 @@ fn quarantine_state(app: AppHandle) -> Result<String, String> {
     let backup = path.with_file_name(format!("state.corrupt-{stamp}.json"));
     fs::rename(&path, &backup).map_err(|e| e.to_string())?;
     Ok(backup.to_string_lossy().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// 백업 · 내보내기 · 가져오기
+// ---------------------------------------------------------------------------
+
+/// 하루치 자동 백업과, 되돌리기 · 가져오기 직전에 남기는 백업.
+///
+/// 파일 이름이 곧 메타데이터다: `backups/state-<유닉스초>-<종류>.json`.
+/// 종류별로 보관 개수를 따로 둔다. 되돌리기를 여러 번 해도 날짜별 백업이
+/// 밀려나지 않게 하려는 것이다.
+mod backup {
+    use super::*;
+
+    pub const DAILY: &str = "daily";
+    pub const BEFORE_RESTORE: &str = "before-restore";
+    pub const BEFORE_IMPORT: &str = "before-import";
+
+    /// 「하루에 한 벌」을 시계 날짜가 아니라 경과 시간으로 판단한다.
+    /// 매일 비슷한 시각에 켜는 사람도 하루씩 빠지지 않게 24시간보다 짧게 둔다.
+    const DAILY_EVERY_SECS: u64 = 20 * 60 * 60;
+
+    fn keep_of(tag: &str) -> usize {
+        if tag == DAILY {
+            7
+        } else {
+            3
+        }
+    }
+
+    pub fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    pub fn dir(app: &AppHandle) -> Result<PathBuf, String> {
+        let d = config_dir(app)?.join("backups");
+        fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+        Ok(d)
+    }
+
+    /// 이 앱이 만든 백업 이름이면 (저장 시각, 종류). 경로 조작 방지도 겸한다.
+    pub fn parse_name(name: &str) -> Option<(u64, &str)> {
+        let stem = name.strip_prefix("state-")?.strip_suffix(".json")?;
+        let (secs, tag) = stem.split_once('-')?;
+        if ![DAILY, BEFORE_RESTORE, BEFORE_IMPORT].contains(&tag) {
+            return None;
+        }
+        Some((secs.parse().ok()?, tag))
+    }
+
+    /// (저장 시각, 종류, 파일 이름) 최신순
+    pub fn entries(dir: &Path) -> Vec<(u64, String, String)> {
+        let mut out: Vec<(u64, String, String)> = fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| {
+                        let name = e.file_name().to_str()?.to_string();
+                        let (secs, tag) = parse_name(&name)?;
+                        Some((secs, tag.to_string(), name))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out
+    }
+
+    pub fn copy_in(dir: &Path, src: &Path, tag: &str, now: u64) -> Result<(), String> {
+        let name = format!("state-{now}-{tag}.json");
+        fs::copy(src, dir.join(name)).map_err(|e| e.to_string())?;
+        for (_, _, old) in entries(dir)
+            .into_iter()
+            .filter(|e| e.1 == tag)
+            .skip(keep_of(tag))
+        {
+            let _ = fs::remove_file(dir.join(old));
+        }
+        Ok(())
+    }
+
+    pub fn daily(dir: &Path, state: &Path, now: u64) -> Result<(), String> {
+        let latest = entries(dir).into_iter().find(|e| e.1 == DAILY);
+        let due = latest.map_or(true, |e| now.saturating_sub(e.0) >= DAILY_EVERY_SECS);
+        if due {
+            copy_in(dir, state, DAILY, now)?;
+        }
+        Ok(())
+    }
+
+    /// state JSON의 (탭 수, 항목 수). 탭 배열이 없으면 이 앱의 설정이 아니다.
+    pub fn counts(v: &serde_json::Value) -> Option<(usize, usize)> {
+        let tabs = v.get("tabs")?.as_array()?;
+        let items = tabs
+            .iter()
+            .map(|t| t.get("items").and_then(|i| i.as_array()).map_or(0, |a| a.len()))
+            .sum();
+        Some((tabs.len(), items))
+    }
+
+    /// 사용자가 고른 아이콘 파일 이름 (icon.type == "image" 이고 data URL이 아닌 것)
+    pub fn user_icon_names(v: &serde_json::Value) -> Vec<String> {
+        let mut out = Vec::new();
+        for tab in v.get("tabs").and_then(|t| t.as_array()).into_iter().flatten() {
+            for item in tab.get("items").and_then(|i| i.as_array()).into_iter().flatten() {
+                let Some(icon) = item.get("icon") else { continue };
+                if icon.get("type").and_then(|t| t.as_str()) != Some("image") {
+                    continue;
+                }
+                if let Some(name) = icon.get("value").and_then(|n| n.as_str()) {
+                    if is_user_icon_name(name) && !out.iter().any(|n| n == name) {
+                        out.push(name.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// store_user_icon이 만드는 이름 모양 `u<16진수16자>.png`만 받는다.
+    pub fn is_user_icon_name(name: &str) -> bool {
+        name.is_ascii()
+            && name.len() == 21
+            && name.starts_with('u')
+            && name.ends_with(".png")
+            && name[1..17].chars().all(|c| c.is_ascii_hexdigit())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupInfo {
+    name: String,
+    /// 유닉스 초
+    saved_at: u64,
+    tag: String,
+    tabs: usize,
+    items: usize,
+}
+
+#[tauri::command(async)]
+fn list_backups(app: AppHandle) -> Result<Vec<BackupInfo>, String> {
+    let dir = backup::dir(&app)?;
+    Ok(backup::entries(&dir)
+        .into_iter()
+        .filter_map(|(saved_at, tag, name)| {
+            let text = fs::read_to_string(dir.join(&name)).ok()?;
+            let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let (tabs, items) = backup::counts(&v)?;
+            Some(BackupInfo { name, saved_at, tag, tabs, items })
+        })
+        .collect())
+}
+
+#[tauri::command(async)]
+fn read_backup(app: AppHandle, name: String) -> Result<String, String> {
+    if backup::parse_name(&name).is_none() {
+        return Err("잘못된 백업 이름입니다".into());
+    }
+    fs::read_to_string(backup::dir(&app)?.join(name)).map_err(|e| e.to_string())
+}
+
+/// 되돌리기 · 가져오기로 덮어쓰기 직전의 상태를 남긴다. 그래야 그 동작도 되돌릴 수 있다.
+#[tauri::command(async)]
+fn backup_now(app: AppHandle, tag: String) -> Result<(), String> {
+    if tag != backup::BEFORE_RESTORE && tag != backup::BEFORE_IMPORT {
+        return Err("알 수 없는 백업 종류입니다".into());
+    }
+    let path = state_path(&app)?;
+    let lock = app.state::<SaveLock>();
+    let _guard = lock.0.lock().map_err(|_| "저장 잠금에 실패했습니다".to_string())?;
+    if !path.exists() {
+        return Ok(());
+    }
+    backup::copy_in(&backup::dir(&app)?, &path, &tag, backup::now_secs())
+}
+
+/// 설정을 파일 하나로 내보낸다. 사용자가 고른 아이콘 이미지는 state.json 밖
+/// (icons/user)에 있으므로 `userIcons`에 base64로 함께 담는다.
+#[tauri::command(async)]
+fn export_state(app: AppHandle, path: String) -> Result<(), String> {
+    let text = {
+        let lock = app.state::<SaveLock>();
+        let _guard = lock.0.lock().map_err(|_| "저장 잠금에 실패했습니다".to_string())?;
+        fs::read_to_string(state_path(&app)?).map_err(|_| "아직 저장된 설정이 없습니다".to_string())?
+    };
+    let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+
+    let user_dir = user_icon_dir(&app)?;
+    let mut icons = serde_json::Map::new();
+    for name in backup::user_icon_names(&v) {
+        if let Ok(bytes) = fs::read(user_dir.join(&name)) {
+            icons.insert(
+                name,
+                base64::engine::general_purpose::STANDARD.encode(bytes).into(),
+            );
+        }
+    }
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("userIcons".into(), serde_json::Value::Object(icons));
+    }
+
+    let out = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    fs::write(&path, out).map_err(|e| e.to_string())
+}
+
+/// 내보낸 파일을 읽어 검사하고, 함께 담긴 아이콘 이미지를 제자리에 풀어 둔다.
+/// state 본문(JSON 문자열)을 돌려준다. 실제 적용은 프런트엔드가 저장 경로로 한다.
+#[tauri::command(async)]
+fn read_import(app: AppHandle, path: String) -> Result<String, String> {
+    const MAX_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+    let size = fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    if size > MAX_IMPORT_BYTES {
+        return Err("파일이 너무 큽니다".into());
+    }
+    let text = fs::read_to_string(&path).map_err(|_| "텍스트 파일이 아닙니다".to_string())?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| "DeskLauncher 설정 파일이 아닙니다".to_string())?;
+    match backup::counts(&v) {
+        Some((tabs, _)) if tabs > 0 => {}
+        _ => return Err("DeskLauncher 설정 파일이 아닙니다".into()),
+    }
+
+    if let Some(icons) = v
+        .as_object_mut()
+        .and_then(|o| o.remove("userIcons"))
+        .and_then(|i| i.as_object().cloned())
+    {
+        let user_dir = user_icon_dir(&app)?;
+        for (name, data) in icons {
+            if !backup::is_user_icon_name(&name) {
+                continue;
+            }
+            let Some(b64) = data.as_str() else { continue };
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                // 이름이 내용의 해시라 이미 있으면 같은 파일이다.
+                let target = user_dir.join(&name);
+                if !target.exists() {
+                    let _ = fs::write(target, bytes);
+                }
+            }
+        }
+    }
+
+    serde_json::to_string(&v).map_err(|e| e.to_string())
 }
 
 #[tauri::command(async)]
@@ -1085,6 +1339,11 @@ pub fn run() {
             load_state,
             save_state,
             quarantine_state,
+            list_backups,
+            read_backup,
+            backup_now,
+            export_state,
+            read_import,
             open_config_dir,
             work_area,
             list_monitors,
@@ -1172,4 +1431,77 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::backup::*;
+    use std::fs;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("desk-launcher-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn names() {
+        assert_eq!(parse_name("state-100-daily.json"), Some((100, "daily")));
+        assert_eq!(parse_name("state-100-before-restore.json"), Some((100, "before-restore")));
+        assert_eq!(parse_name("state-100-evil.json"), None);
+        assert_eq!(parse_name("../state-100-daily.json"), None);
+        assert_eq!(parse_name("state-x-daily.json"), None);
+        assert!(is_user_icon_name("u0123456789abcdef.png"));
+        assert!(!is_user_icon_name("u0123456789abcdeg.png"));
+        assert!(!is_user_icon_name("..\0123456789abc.png"));
+        assert!(!is_user_icon_name("u가나다라마바사.png"));
+    }
+
+    #[test]
+    fn daily_every_20h_keeps_7() {
+        let root = temp_dir("daily");
+        let dir = root.join("backups");
+        fs::create_dir_all(&dir).unwrap();
+        let state = root.join("state.json");
+        fs::write(&state, r#"{"tabs":[]}"#).unwrap();
+
+        let h = 3600;
+        daily(&dir, &state, 1_000_000).unwrap();
+        daily(&dir, &state, 1_000_000 + 5 * h).unwrap(); // 20시간이 안 지남 → 건너뜀
+        assert_eq!(entries(&dir).len(), 1);
+        for day in 1..=10 {
+            daily(&dir, &state, 1_000_000 + day * 20 * h).unwrap();
+        }
+        let all = entries(&dir);
+        assert_eq!(all.len(), 7);
+        assert_eq!(all[0].0, 1_000_000 + 10 * 20 * h); // 최신순
+
+        // 다른 종류는 따로 세고, 날짜별 백업을 밀어내지 않는다.
+        for i in 0..5 {
+            copy_in(&dir, &state, BEFORE_RESTORE, 2_000_000 + i).unwrap();
+        }
+        let all = entries(&dir);
+        assert_eq!(all.iter().filter(|e| e.1 == DAILY).count(), 7);
+        assert_eq!(all.iter().filter(|e| e.1 == BEFORE_RESTORE).count(), 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn counts_and_icons() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"tabs":[
+                {"items":[
+                    {"icon":{"type":"image","value":"u0123456789abcdef.png"}},
+                    {"icon":{"type":"image","value":"data:image/png;base64,AAA"}},
+                    {"icon":{"type":"auto","value":""}}
+                ]},
+                {"items":[{"icon":{"type":"image","value":"u0123456789abcdef.png"}}]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(counts(&v), Some((2, 4)));
+        assert_eq!(user_icon_names(&v), vec!["u0123456789abcdef.png".to_string()]);
+        assert_eq!(counts(&serde_json::json!({"foo": 1})), None);
+    }
 }

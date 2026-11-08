@@ -370,6 +370,22 @@ export async function hydrate() {
   }, { deep: true });
 }
 
+/** 백업 · 가져온 파일의 내용으로 지금 상태를 통째로 바꾸고 바로 저장합니다.
+    다른 창은 저장 알림을 받아 따라옵니다. 덮어쓰기 전 백업은 부르는 쪽에서 남깁니다. */
+export async function replaceState(raw) {
+  const parsed = JSON.parse(raw);
+  if (typeof parsed.version === "number" && parsed.version > SCHEMA_VERSION) {
+    throw new Error(
+      `더 새로운 버전에서 만든 설정입니다 (v${parsed.version}). 앱을 먼저 업데이트하세요.`
+    );
+  }
+  if (!Array.isArray(parsed.tabs) || parsed.tabs.length === 0) {
+    throw new Error("탭이 없는 설정 파일입니다");
+  }
+  applyLoaded(parsed);
+  await flushSave();
+}
+
 /* ---------------------------------------------------------------------------
    창 간 동기화 보류
    ---------------------------------------------------------------------------

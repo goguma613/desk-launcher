@@ -1,11 +1,11 @@
 {
-  "version": "0.3.4",
-  "notes": "빈 곳 우클릭 메뉴, 휠로 탭 전환, 항상 관리자 권한으로 실행, Ctrl+Shift+클릭·가운데 클릭, 자주 쓴 항목 검색 우선, 업데이트 확인 주소 이중화",
-  "pub_date": "2026-11-08T09:35:07.496Z",
+  "version": "0.3.5",
+  "notes": "자동 백업과 되돌리기, 설정 내보내기·가져오기, 자동 실행 경로 자동 갱신, 사라진 항목 다시 확인",
+  "pub_date": "2026-11-08T14:00:45.648Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUMGk5R3gyOEFlK0VXM1dQcHZIVUwyRXZCTXNIdmNHdThHRGR1ZzZOT2d4S0ZUSEtCTWwwNnFpRmVHVkJ1b3psOU5LTVRJL2dOWkJQMGUrM21oTGdod1pYYjR4am1CYWdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTMwNTAwCWZpbGU6RGVza0xhdW5jaGVyXzAuMy40X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjMuNAowbmlWRk83dmJKbVBaanIyYUtLa2JuSmNrczgxSmh6QUFCNTZkamdHWUxHbFJDR05keEV2R0c3dkxqZzJWTWNpZlRkL2FVQm8ySE9uSFNDWXN3SUNEdz09Cg==",
-      "url": "https://github.com/goguma613/desk-launcher/releases/download/v0.3.4/DeskLauncher_0.3.4_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUMGk5R3gyOEFlK0RuY1JybEdmWWxrSDlRNUN3Tmk2MnRkYnl5UWZaRFBra0xGMGZpVytSRHIyQW5ZVy9XRVJSeE5xU0JWbjJwZGRLUGNHMDFaQjVBNjJ5bzN1L0FLSHdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTQ2NDM4CWZpbGU6RGVza0xhdW5jaGVyXzAuMy41X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjMuNQo3Q2lrM0R5S3lrTGZZcXhvdytDblNzMm5SQnl2emdBaEtNbXdjeWcxU3owb2R3UnRKRktpV3RBd29CS2EzYVZGOS9sL3hxOVJZN0w3bjQwek12NHRCQT09Cg==",
+      "url": "https://github.com/goguma613/desk-launcher/releases/download/v0.3.5/DeskLauncher_0.3.5_x64-setup.exe"
     }
   }
 }

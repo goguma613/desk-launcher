@@ -6,7 +6,8 @@ import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import ShortcutInput from "./components/ShortcutInput.vue";
 import ItemEditor from "./components/ItemEditor.vue";
 import Sheet from "./components/Sheet.vue";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog, ask } from "@tauri-apps/plugin-dialog";
+import { Menu, MenuItem } from "@tauri-apps/api/menu";
 import { UI_ICONS } from "./icons";
 import { PRESETS, MODES } from "./layout";
 import {
@@ -21,6 +22,7 @@ import {
   moveTab,
   addItems,
   removeItem,
+  replaceState,
   MAX_TABS,
 } from "./store";
 import { prefetch, refreshAll } from "./extractedIcons";
@@ -173,6 +175,122 @@ async function openConfigDir() {
     await invoke("open_config_dir");
   } catch (e) {
     console.error(e);
+  }
+}
+
+/* ---- 백업 · 내보내기 · 가져오기 ------------------------------------------
+   자동 백업은 저장할 때 Rust 쪽이 하루에 한 벌씩 backups/에 남깁니다.
+   되돌리기와 가져오기는 덮어쓰기 직전 상태를 먼저 백업해 두므로, 그 동작도
+   다시 되돌릴 수 있습니다. */
+
+function say(msg, ms = 2600) {
+  busy.value = msg;
+  setTimeout(() => {
+    if (busy.value === msg) busy.value = "";
+  }, ms);
+}
+
+const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
+
+function backupLabel(b) {
+  const d = new Date(b.savedAt * 1000);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const when = `${d.getMonth() + 1}월 ${d.getDate()}일 (${WEEKDAYS[d.getDay()]}) ${hh}:${mm}`;
+  const why =
+    b.tag === "before-restore" ? " — 되돌리기 직전" : b.tag === "before-import" ? " — 가져오기 직전" : "";
+  return `${when}${why}   ·   탭 ${b.tabs} · 항목 ${b.items}`;
+}
+
+async function showBackups() {
+  let list = [];
+  try {
+    list = await invoke("list_backups");
+  } catch (e) {
+    say(`백업 목록을 읽지 못했습니다: ${e}`);
+    return;
+  }
+  if (!list.length) {
+    say("아직 백업이 없습니다 — 설정이 바뀌면 하루에 한 번 남깁니다", 3200);
+    return;
+  }
+  try {
+    const items = await Promise.all(
+      list.map((b) => MenuItem.new({ text: backupLabel(b), action: () => restoreBackup(b) }))
+    );
+    const menu = await Menu.new({ items });
+    await menu.popup();
+  } catch (e) {
+    console.error("백업 메뉴 실패", e);
+  }
+}
+
+async function restoreBackup(b) {
+  const ok = await ask(
+    `${backupLabel(b)}
+
+이 상태로 되돌릴까요? 지금 상태는 백업에 따로 남겨 두니 다시 돌아올 수 있습니다.`,
+    { title: "백업에서 되돌리기", kind: "warning", okLabel: "되돌리기", cancelLabel: "취소" }
+  );
+  if (!ok) return;
+  try {
+    await flushSave();
+    await invoke("backup_now", { tag: "before-restore" });
+    const raw = await invoke("read_backup", { name: b.name });
+    await replaceState(raw);
+    say("되돌렸습니다 — 직전 상태도 백업에 남겨 두었습니다", 3600);
+  } catch (e) {
+    say(`되돌리지 못했습니다: ${e}`, 4000);
+  }
+}
+
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+async function exportSettings() {
+  try {
+    const path = await saveDialog({
+      title: "설정 내보내기",
+      defaultPath: `DeskLauncher-설정-${today()}.json`,
+      filters: [{ name: "DeskLauncher 설정", extensions: ["json"] }],
+    });
+    if (!path) return;
+    await flushSave();
+    await invoke("export_state", { path });
+    say("내보냈습니다 — 직접 고른 아이콘 이미지도 함께 담겼습니다", 3200);
+  } catch (e) {
+    say(`내보내지 못했습니다: ${e}`, 4000);
+  }
+}
+
+async function importSettings() {
+  try {
+    const path = await openDialog({
+      multiple: false,
+      directory: false,
+      title: "설정 가져오기",
+      filters: [{ name: "DeskLauncher 설정", extensions: ["json"] }],
+    });
+    if (!path) return;
+    const raw = await invoke("read_import", { path });
+    const parsed = JSON.parse(raw);
+    const tabs = parsed.tabs.length;
+    const items = parsed.tabs.reduce((n, t) => n + (Array.isArray(t.items) ? t.items.length : 0), 0);
+    const ok = await ask(
+      `탭 ${tabs}개 · 항목 ${items}개
+
+지금 탭과 항목, 설정을 이 파일 내용으로 바꿀까요? 지금 상태는 백업에 남겨 둡니다.`,
+      { title: "설정 가져오기", kind: "warning", okLabel: "바꾸기", cancelLabel: "취소" }
+    );
+    if (!ok) return;
+    await flushSave();
+    await invoke("backup_now", { tag: "before-import" });
+    await replaceState(raw);
+    say("가져왔습니다 — 이전 상태는 백업에서 되돌릴 수 있습니다", 3600);
+  } catch (e) {
+    say(`가져오지 못했습니다: ${e}`, 4000);
   }
 }
 
@@ -634,6 +752,14 @@ watch(() => state.settings.opacity, applyOpacity);
           <span class="seg-label">탭</span>
           <span class="tab-sum">탭 {{ state.tabs.length }}개 · 항목 {{ itemCount }}개</span>
           <button class="btn small" @click="view = 'tabs'">탭 편집</button>
+        </div>
+
+        <div class="seg-row">
+          <span class="seg-label">백업</span>
+          <span class="tab-sum" title="설정이 바뀐 날마다 한 벌씩, 최근 7개를 보관합니다">하루 한 번 자동</span>
+          <button class="btn small" title="자동 백업 중 하나로 되돌립니다" @click="showBackups">되돌리기…</button>
+          <button class="btn small" title="다른 PC로 옮기거나 따로 보관할 파일로 저장합니다" @click="exportSettings">내보내기…</button>
+          <button class="btn small" title="내보낸 파일로 지금 설정을 바꿉니다" @click="importSettings">가져오기…</button>
         </div>
 
         <div class="switches">
