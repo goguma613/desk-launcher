@@ -72,13 +72,29 @@ function measure() {
   };
 }
 
-/* 데스크톱 휠은 세로로만 돕니다. 탭 바에서는 가로로 바꿔 줍니다.
-   스크롤바를 숨겨 놓아서 이게 없으면 넘친 탭에 닿을 방법이 마우스로는 없습니다. */
+/* 휠을 굴리면 옆 탭으로 넘어갑니다. 하단 바처럼 탭이 작은 곳에서 정확히
+   누르지 않아도 되게 합니다. 넘친 탭은 활성 탭을 따라 저절로 스크롤됩니다.
+
+   터치패드는 한 번 쓸 때 작은 값이 여러 번 들어오므로 모아서 한 칸으로 치고,
+   한 칸 넘긴 직후 잠깐은 무시합니다. 안 그러면 한 번에 끝까지 넘어갑니다. */
+const WHEEL_STEP = 40;
+const WHEEL_REST = 160;
+let wheelSum = 0;
+let wheelRestUntil = 0;
+
 function onWheel(e) {
-  const el = strip.value;
-  if (!el || el.scrollWidth <= el.clientWidth) return;
+  if (props.renamingId || props.tabs.length < 2) return;
   e.preventDefault();
-  el.scrollLeft += e.deltaY || e.deltaX;
+  const now = Date.now();
+  if (now < wheelRestUntil) return;
+  wheelSum += e.deltaY || e.deltaX;
+  if (Math.abs(wheelSum) < WHEEL_STEP) return;
+  const step = wheelSum > 0 ? 1 : -1;
+  wheelSum = 0;
+  wheelRestUntil = now + WHEEL_REST;
+  const i = props.tabs.findIndex((t) => t.id === props.activeId);
+  const next = Math.min(props.tabs.length - 1, Math.max(0, i + step));
+  if (next !== i) select(props.tabs[next].id);
 }
 
 function select(id) {
@@ -135,7 +151,7 @@ watch(
         class="tab"
         :class="{ on: tab.id === activeId, drop: tab.id === dropTarget }"
         :data-tab-id="tab.id"
-        title="더블클릭: 이름 바꾸기 · 우클릭: 메뉴"
+        title="더블클릭: 이름 바꾸기 · 우클릭: 메뉴 · 휠: 옆 탭으로"
         @click="select(tab.id)"
         @dblclick="emit('rename-start', tab.id)"
         @contextmenu.prevent="emit('menu', tab, $event)"

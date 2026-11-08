@@ -5,7 +5,13 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
+import {
+  CheckMenuItem,
+  Menu,
+  MenuItem,
+  PredefinedMenuItem,
+  Submenu,
+} from "@tauri-apps/api/menu";
 import {
   enable as enableAutostart,
   disable as disableAutostart,
@@ -109,7 +115,8 @@ const searchInput = ref(null);
      3  초성이 중간에 포함
      4  파일 이름(확장자 뺀)에 포함 — 폴더 경로는 보지 않습니다.
         C:\Windows\... 아래 항목이 「win」에 전부 걸리던 문제가 있었습니다.
-   같은 순위면 지금 보고 있는 탭의 항목, 그다음 원래 순서. */
+   같은 순위면 자주 실행한 항목(launches), 그다음 지금 보고 있는 탭의 항목,
+   그다음 원래 순서. */
 const CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ";
 // 한글 입력기로 ㄹ, ㄱ 을 연달아 치면 겹받침 ㄺ 하나로 합쳐집니다.
 const SPLIT_JAMO = {
@@ -187,7 +194,12 @@ const matches = computed(() => {
       if (score >= 0) scored.push({ it, score, order: order++ });
     }
   }
-  scored.sort((a, b) => a.score - b.score || a.order - b.order);
+  scored.sort(
+    (a, b) =>
+      a.score - b.score ||
+      (b.it.launches || 0) - (a.it.launches || 0) ||
+      a.order - b.order
+  );
   return scored.map((x) => x.it);
 });
 
@@ -467,6 +479,8 @@ const launchedId = ref("");
 let launchedTimer = null;
 
 function openItem(item, { admin = false } = {}) {
+  // 관리자 실행은 프로그램만. 폴더 · 문서에 Ctrl+Shift+클릭하면 그냥 엽니다.
+  const elevate = item.kind === "app" && (admin || item.admin === true);
   const now = Date.now();
   if (lastLaunch.id === item.id && now - lastLaunch.at < REPEAT_GUARD) return;
   lastLaunch = { id: item.id, at: now };
@@ -475,8 +489,10 @@ function openItem(item, { admin = false } = {}) {
   if (launchedTimer) clearTimeout(launchedTimer);
   launchedTimer = setTimeout(() => (launchedId.value = ""), 600);
 
-  invoke("launch", { path: item.path, admin })
+  invoke("launch", { path: item.path, admin: elevate })
     .then(() => {
+      // 검색 순위에 씁니다. 저장 파일이 끝없이 커지지 않게 상한을 둡니다.
+      item.launches = Math.min((item.launches || 0) + 1, 9999);
       if (searching.value) closeSearch();
       // 오버레이는 불러내서 하나 실행하고 끝나는 용도입니다.
       if (state.settings.mode === "overlay") {
@@ -489,6 +505,17 @@ function openItem(item, { admin = false } = {}) {
       if (String(e) === "cancelled") return;
       flash(`실행하지 못했습니다: ${e}`);
     });
+}
+
+/** 파일 위치 열기. 우클릭 메뉴와 가운데 클릭이 같이 씁니다. 웹 링크는 그냥 엽니다. */
+function revealItem(item) {
+  if (item.kind === "url") {
+    openItem(item);
+    return;
+  }
+  invoke("reveal", { path: item.path }).catch((e) =>
+    flash(`위치를 열지 못했습니다: ${e}`)
+  );
 }
 
 /** 항목이 들어 있는 탭. 검색 결과는 여러 탭에서 오므로 활성 탭으로 단정할 수 없습니다. */
@@ -629,17 +656,29 @@ async function browseFolders() {
 const renamingItemId = ref("");
 const renamingTabId = ref("");
 
+/* 메뉴를 만들고 띄우는 동안 우클릭이 또 들어오면 무시합니다. popup은 메뉴가
+   닫힐 때까지 돌아오지 않는데(Windows 메뉴 루프), 그 사이에 두 번째 메뉴를
+   띄우면 메뉴 루프가 겹칩니다. */
+let menuOpen = false;
+
 async function popup(entries) {
-  const built = [];
-  for (const e of entries) {
-    if (e === "-") built.push(await PredefinedMenuItem.new({ item: "Separator" }));
-    else if (e.items) built.push(await Submenu.new(e));
-    else built.push(await MenuItem.new(e));
+  if (menuOpen) return;
+  menuOpen = true;
+  try {
+    const built = [];
+    for (const e of entries) {
+      if (e === "-") built.push(await PredefinedMenuItem.new({ item: "Separator" }));
+      else if (e.items) built.push(await Submenu.new(e));
+      else if ("checked" in e) built.push(await CheckMenuItem.new(e));
+      else built.push(await MenuItem.new(e));
+    }
+    const menu = await Menu.new({ items: built });
+    await menu.popup();
+    // 메뉴 동작은 popup이 끝난 뒤에 도착할 수 있어서 바로 닫지 않습니다.
+    setTimeout(() => menu.close().catch(() => {}), 5000);
+  } finally {
+    menuOpen = false;
   }
-  const menu = await Menu.new({ items: built });
-  await menu.popup();
-  // 메뉴 동작은 popup이 끝난 뒤에 도착할 수 있어서 바로 닫지 않습니다.
-  setTimeout(() => menu.close().catch(() => {}), 5000);
 }
 
 async function showItemMenu(item) {
@@ -650,21 +689,16 @@ async function showItemMenu(item) {
   const isUrl = item.kind === "url";
 
   const entries = [{ text: "열기", action: () => openItem(item) }];
-  // 게임 런처 · 시스템 도구처럼 관리자 권한이 필요한 프로그램용
-  if (item.kind === "app") {
+  // 게임 런처 · 시스템 도구처럼 관리자 권한이 필요한 프로그램용.
+  // 늘 관리자로 실행하도록 해 두었으면 「열기」가 이미 그렇게 하므로 숨깁니다.
+  if (item.kind === "app" && !item.admin) {
     entries.push({
       text: "관리자 권한으로 실행",
       action: () => openItem(item, { admin: true }),
     });
   }
   if (!isUrl) {
-    entries.push({
-      text: "파일 위치 열기",
-      action: () =>
-        invoke("reveal", { path: item.path }).catch((e) =>
-          flash(`위치를 열지 못했습니다: ${e}`)
-        ),
-    });
+    entries.push({ text: "파일 위치 열기", action: () => revealItem(item) });
   }
   if (missing.value.has(item.id)) {
     entries.push({ text: "새 위치 찾기…", action: () => relocateItem(item) });
@@ -684,6 +718,13 @@ async function showItemMenu(item) {
     text: isUrl ? "주소 · 아이콘 바꾸기…" : "아이콘 바꾸기…",
     action: () => openEditor(item),
   });
+  if (item.kind === "app") {
+    entries.push({
+      text: "항상 관리자 권한으로 실행",
+      checked: item.admin === true,
+      action: () => toggleAdmin(item),
+    });
+  }
   entries.push("-");
   entries.push({ text: "삭제", action: () => onRemove(item) });
 
@@ -693,6 +734,60 @@ async function showItemMenu(item) {
     // 메뉴를 못 띄우면 예전처럼 시트로 엽니다.
     console.error("메뉴 실패", e);
     openEditor(item);
+  }
+}
+
+function toggleAdmin(item) {
+  if (item.admin) {
+    delete item.admin;
+    flash(`${item.name} — 이제 관리자 권한 없이 실행합니다`);
+  } else {
+    item.admin = true;
+    flash(`${item.name} — 이제 늘 관리자 권한으로 실행합니다`);
+  }
+}
+
+/* 빈 곳 우클릭. 브라우저 기본 메뉴(새로 고침 · 인쇄 …)는 webviewGuard.js가
+   막고, 그 자리에 런처 메뉴를 띄웁니다. 항목 · 탭 · 입력칸은 각자 처리합니다.
+   「여러 개 지우기」(편집 모드)는 푸터 버튼에서 이리로 옮겼습니다. 하나씩
+   지우기는 우클릭과 Delete로 되니, 편집 모드는 가끔 쓰는 기능입니다. */
+async function showPanelMenu(e) {
+  if (overlay.value) return;
+  if (e.target.closest?.(".tile, [data-tab-id], input, textarea, button")) return;
+  const entries = [
+    { text: "파일 · 프로그램 추가…", action: browseFiles },
+    { text: "폴더 추가…", action: browseFolders },
+    { text: "웹 링크 추가…", action: openLinkAdder },
+    "-",
+    editing.value
+      ? { text: "여러 개 지우기 끝내기", action: () => (editing.value = false) }
+      : {
+          text: "여러 개 지우기",
+          enabled: items.value.length > 0,
+          action: () => {
+            if (searching.value) closeSearch();
+            editing.value = true;
+          },
+        },
+    {
+      text: "새 탭",
+      enabled: state.tabs.length < MAX_TABS,
+      action: onAddTab,
+    },
+    "-",
+    {
+      text: "기본 자리로",
+      action: async () => {
+        state.settings.offsets[state.settings.preset] = { x: 0, y: 0 };
+        await applyLayout();
+      },
+    },
+    { text: "설정…", action: () => invoke("open_settings") },
+  ];
+  try {
+    await popup(entries);
+  } catch (err) {
+    console.error("메뉴 실패", err);
   }
 }
 
@@ -1279,6 +1374,7 @@ watch(
     :data-axis="axis"
     :data-fit="fitBar ? '' : null"
     :class="{ ready, editing, 'drop-on': dropActive }"
+    @contextmenu="showPanelMenu"
   >
     <!-- 탭 바 -->
     <header class="tabbar" :inert="overlay !== null" data-tauri-drag-region>
@@ -1376,6 +1472,7 @@ watch(
         @over-tab="dragOverTab = $event"
         @drop-on-tab="onDropOnTab"
         @hover="hoveredItem = $event"
+        @reveal="revealItem"
       />
       <div v-else-if="filtering" class="no-match">
         <span><strong>{{ query }}</strong>에 맞는 항목이 없습니다</span>
@@ -1393,7 +1490,7 @@ watch(
       <span
         class="status"
         data-tauri-drag-region
-        title="끌어다 놓아 추가 · 우클릭으로 메뉴 · 끌어서 순서 변경 · 글자를 치면 검색"
+        title="끌어다 놓아 추가 · 우클릭으로 메뉴(빈 곳: 여러 개 지우기 등) · 끌어서 순서 변경 · 글자를 치면 검색"
       >
         <template v-if="filtering">{{ matches.length }}개 찾음</template>
         <template v-else-if="searching">이름을 입력하세요</template>
@@ -1410,17 +1507,6 @@ watch(
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="1.8" stroke-linecap="round" v-html="UI_ICONS.plus" />
         <span class="foot-label">추가</span>
-      </button>
-      <button
-        class="foot-btn"
-        :class="{ on: editing }"
-        :title="editing ? '편집 끝내기' : '편집 — 여러 개를 한꺼번에 지울 때'"
-        @click="editing = !editing"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
-             v-html="UI_ICONS.pencil" />
-        <span class="foot-label">편집</span>
       </button>
       <button
         class="foot-btn"
@@ -1753,12 +1839,6 @@ watch(
   background: rgb(var(--tile) / var(--surface-alpha-hover));
   color: rgb(var(--text));
 }
-.foot-btn.on {
-  background: rgb(var(--accent) / var(--accent-soft-alpha));
-  color: rgb(var(--accent-ink));
-  font-weight: 700;
-}
-
 /* 새 버전이 있을 때. 토스트는 사라지지만 이 점은 남습니다. */
 .foot-btn.badge::after {
   content: "";

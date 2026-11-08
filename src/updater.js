@@ -10,15 +10,36 @@ import { check } from "@tauri-apps/plugin-updater";
  *          최신이면 null
  */
 export async function findUpdate() {
-  const update = await check();
+  // 확인 주소는 두 곳입니다(tauri.conf.json plugins.updater.endpoints).
+  // 릴리스 주소가 실패하면 플러그인이 저장소의 updater/latest.json 으로 넘어갑니다.
+  // 둘 다 실패해도 GitHub가 잠깐 504를 내는 경우가 많아 한 번 더 시도합니다.
+  const update = await retry(() => check());
   if (!update) return null;
 
   return {
     version: update.version,
     notes: update.body || "",
     // 설치하면 NSIS 설치 파일이 실행되면서 앱이 종료됩니다.
-    install: () => update.downloadAndInstall(),
+    // 설치 파일은 릴리스에서만 받으므로, 내려받기가 끊기면 몇 번 다시 시도합니다.
+    install: () => retry(() => update.downloadAndInstall(), 3),
   };
+}
+
+/**
+ * GitHub 릴리스 다운로드는 가끔 몇 초씩 504를 냅니다(2026-11-08 v0.3.3 배포 때
+ * 다섯 번 중 세 번 실패). 잠깐 쉬었다 다시 하면 대개 됩니다.
+ */
+async function retry(fn, attempts = 2, delayMs = 1500) {
+  let last;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      last = e;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs * (i + 1)));
+    }
+  }
+  throw last;
 }
 
 /**

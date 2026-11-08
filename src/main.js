@@ -3,6 +3,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./style.css";
 import App from "./App.vue";
 import SettingsApp from "./SettingsApp.vue";
+import { installWebviewGuard } from "./webviewGuard";
+
+installWebviewGuard();
 
 /**
  * 설정은 별도 창입니다. 같은 번들을 두 창이 함께 쓰고, 어느 화면을 그릴지는

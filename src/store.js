@@ -66,6 +66,8 @@ export const state = reactive(defaultState());
      kind: 'app'|'file'|'folder'|'url'
      ext:  string          소문자 확장자, 점 없음
      icon: { type: 'auto'|'builtin'|'image', value: string }
+     admin?:    true    항상 관리자 권한으로 실행 (kind 'app'만)
+     launches?: number  실행 횟수. 검색 결과에서 점수가 같을 때 자주 쓴 것을 앞에 둡니다
    }
    icon.type
      auto    - 확장자로 추론, 못 찾으면 이름 첫 글자
@@ -225,6 +227,10 @@ function normalizeTabs(saved) {
               it.icon && typeof it.icon === "object"
                 ? { type: it.icon.type || "auto", value: it.icon.value || "" }
                 : { type: "auto", value: "" },
+            ...(it.admin === true ? { admin: true } : {}),
+            ...(Number.isFinite(it.launches) && it.launches > 0
+              ? { launches: Math.floor(it.launches) }
+              : {}),
           }))
       : [],
   }));
@@ -304,6 +310,11 @@ function applyLoaded(parsed) {
       item.path = incItem.path;
       item.kind = incItem.kind;
       item.ext = incItem.ext;
+      // 선택 필드는 없으면 지웁니다. 남겨 두면 다른 창에서 끈 것이 되살아납니다.
+      for (const key of ["admin", "launches"]) {
+        if (key in incItem) item[key] = incItem[key];
+        else delete item[key];
+      }
       if (
         item.icon.type !== incItem.icon.type ||
         item.icon.value !== incItem.icon.value

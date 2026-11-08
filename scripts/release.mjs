@@ -7,7 +7,7 @@
  *
  * 자세한 순서는 docs/release.md 를 보세요.
  */
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,9 +53,18 @@ const manifest = {
 };
 
 const manifestPath = join(nsisDir, "latest.json");
-writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+const body = JSON.stringify(manifest, null, 2) + "\n";
+writeFileSync(manifestPath, body);
+
+// 두 번째 확인 주소(raw.githubusercontent.com)가 읽는 사본. 릴리스 다운로드가
+// 504를 낼 때 앱이 이쪽으로 넘어옵니다. 커밋해서 main에 올려야 반영됩니다.
+const mirrorDir = join(root, "updater");
+mkdirSync(mirrorDir, { recursive: true });
+const mirrorPath = join(mirrorDir, "latest.json");
+writeFileSync(mirrorPath, body);
 
 console.log(`latest.json 생성: ${manifestPath}`);
+console.log(`저장소 사본 갱신: ${mirrorPath}`);
 console.log("");
 console.log("이제 이 명령으로 릴리스를 올리세요:");
 console.log("");
@@ -69,3 +78,6 @@ console.log(
     `  --notes "${manifest.notes}"`,
   ].join(" \\\n")
 );
+console.log("");
+console.log("릴리스가 올라간 뒤에 updater/latest.json 을 커밋해 main에 푸시하세요.");
+console.log("먼저 푸시하면 사본이 아직 없는 설치 파일을 가리킵니다.");

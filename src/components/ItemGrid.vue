@@ -35,6 +35,7 @@ const emit = defineEmits([
   "rename-commit",
   "rename-cancel",
   "hover",
+  "reveal",
 ]);
 
 /* ---------------------------------------------------------------------------
@@ -208,11 +209,20 @@ function onPointerUp() {
   }
 }
 
-function onTileClick(item) {
+/* Windows와 같은 손버릇
+     Ctrl+Shift+클릭  관리자 권한으로 실행 (작업 표시줄 · 시작 메뉴와 같음)
+     가운데 클릭      파일 위치 열기 */
+function onTileClick(item, e) {
   if (suppressClick) return;
   if (item.id === props.renamingId) return;
   if (props.editing) emit("edit", item);
-  else emit("open", item);
+  else emit("open", item, { admin: !!(e && e.ctrlKey && e.shiftKey) });
+}
+
+function onTileAux(item, e) {
+  if (e.button !== 1 || props.editing || item.id === props.renamingId) return;
+  e.preventDefault();
+  emit("reveal", item);
 }
 
 const draggedItem = computed(() =>
@@ -308,11 +318,23 @@ onBeforeUnmount(() => {
       @pointerdown="onPointerDown($event, i)"
       @pointerenter="onTileEnter($event, item)"
       @pointerleave="onTileLeave"
-      @click="onTileClick(item)"
+      @click="onTileClick(item, $event)"
+      @mousedown.middle.prevent
+      @auxclick="onTileAux(item, $event)"
       @keydown.enter.self.prevent="onTileClick(item)"
       @contextmenu.prevent="hideTip(); emit('menu', item, $event)"
     >
-      <AppIcon :item="item" :box="iconBox" />
+      <span class="icon-slot">
+        <AppIcon :item="item" :box="iconBox" />
+        <span
+          v-if="item.admin && item.kind === 'app'"
+          class="admin-badge"
+          title="항상 관리자 권한으로 실행"
+        >
+          <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"
+               v-html="UI_ICONS.shield" />
+        </span>
+      </span>
       <input
         v-if="item.id === renamingId"
         ref="renameInput"
@@ -453,6 +475,32 @@ onBeforeUnmount(() => {
 
 .tile:hover .name {
   color: rgb(var(--text));
+}
+
+/* 아이콘 자리. 크기는 AppIcon 그대로라 셀 높이 계산(layout.js)과 무관합니다. */
+.icon-slot {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  line-height: 0;
+}
+/* 「항상 관리자 권한으로 실행」 — 아이콘 오른쪽 아래 작은 방패 */
+.admin-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -3px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  background: rgb(var(--panel));
+  color: rgb(var(--accent));
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.35);
+}
+.admin-badge svg {
+  width: 11px;
+  height: 11px;
 }
 
 /* 경로가 사라진 항목 */
