@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { emit, listen } from "@tauri-apps/api/event";
+import { emit, emitTo, listen } from "@tauri-apps/api/event";
 
 import ShortcutInput from "./components/ShortcutInput.vue";
 import { UI_ICONS } from "./icons";
@@ -164,6 +164,11 @@ async function refreshIcons() {
   setTimeout(() => (busy.value = ""), 2200);
 }
 
+/** 끌어 옮긴 위치를 지우고 배치 기본 자리로 돌립니다. 런처 창이 처리합니다. */
+function resetPosition() {
+  emitTo("main", "launcher://reset-position").catch((e) => console.error(e));
+}
+
 function close() {
   flushSave().finally(() => invoke("close_settings"));
 }
@@ -305,6 +310,10 @@ watch(() => state.settings.opacity, applyOpacity);
             <span class="card-title">{{ p.label }}</span>
             <span class="card-hint">{{ p.hint }}</span>
           </button>
+        </div>
+        <div class="place-row">
+          <p class="note">패널은 빈 곳을 끌어 옮길 수 있습니다.</p>
+          <button class="btn" @click="resetPosition">위치 초기화</button>
         </div>
       </section>
 
@@ -956,6 +965,17 @@ section {
 .winfoot .btn svg {
   width: 14px;
   height: 14px;
+}
+
+.place-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.place-row .note {
+  margin: 0;
 }
 
 .note {

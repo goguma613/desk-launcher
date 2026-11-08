@@ -26,24 +26,32 @@ C:\Users\<사용자>\.tauri\desk-launcher.key.pub   공개 키 — tauri.conf.js
 `src-tauri/tauri.conf.json` 의 `version` 을 올립니다. 이 값 하나가 기준입니다.
 
 ```json
-"version": "0.2.0"
+"version": "0.3.0"
 ```
 
 ## 2. 서명해서 빌드
 
-비밀 키 경로를 환경 변수로 걸고 빌드합니다. 이걸 빼먹으면 `.sig` 파일이
+비밀 키의 **내용**을 환경 변수로 걸고 빌드합니다. 이걸 빼먹으면 `.sig` 파일이
 안 나오고 업데이트가 동작하지 않습니다.
 
 ```bash
-TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.tauri/desk-launcher.key" npm run tauri build
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/desk-launcher.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+npm run tauri build
 ```
 
 PowerShell이라면:
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$env:USERPROFILE\.tauri\desk-launcher.key"
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$env:USERPROFILE\.tauri\desk-launcher.key" -Raw
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 npm run tauri build
 ```
+
+`TAURI_SIGNING_PRIVATE_KEY_PATH`(경로)는 번들러가 읽지 않습니다. `tauri signer
+generate`가 그렇게 안내하지만, 쓰면 설치 파일만 나오고 마지막에
+"A public key has been found, but no private key"로 끝납니다.
+빌드 뒤 `bundle/nsis/`에 `.exe`와 `.exe.sig`가 둘 다 있는지 확인하세요.
 
 ## 3. latest.json 만들기
 
@@ -64,7 +72,7 @@ node scripts/release.mjs "바뀐 내용 한 줄"
 | `DeskLauncher_<버전>_x64-setup.exe` | 설치 파일 |
 | `latest.json` | 앱이 보고 판단하는 목록 |
 
-태그는 `v0.2.0` 형식이어야 합니다. `latest.json` 안의 다운로드 URL이 그
+태그는 `v0.3.0` 형식이어야 합니다. `latest.json` 안의 다운로드 URL이 그
 태그를 가리키기 때문입니다.
 
 ---
@@ -81,7 +89,7 @@ node scripts/release.mjs "바뀐 내용 한 줄"
 **「최신 버전입니다」만 나온다** — `latest.json` 의 `version` 이 현재 설치된
 버전보다 높은지 확인하세요. 같거나 낮으면 업데이트로 치지 않습니다.
 
-**서명 오류가 난다** — 빌드할 때 `TAURI_SIGNING_PRIVATE_KEY_PATH` 를 안 걸었거나,
+**서명 오류가 난다** — 빌드할 때 `TAURI_SIGNING_PRIVATE_KEY` 에 키 내용을 안 넣었거나,
 `tauri.conf.json` 의 `pubkey` 가 다른 키의 것입니다.
 
 **릴리스는 올렸는데 못 찾는다** — `latest.json` 이 **latest 릴리스**에 붙어

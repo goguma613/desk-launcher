@@ -172,6 +172,23 @@ export function moveTab(from, to) {
    영속화
    --------------------------------------------------------------------------- */
 
+/** 어떤 모니터에서도 나올 수 없는 보정값인지.
+    최소화된 창의 좌표(-32000)가 보정값으로 저장된 적이 있습니다. */
+export function isSaneOffset(o) {
+  return (
+    o &&
+    Number.isFinite(o.x) &&
+    Number.isFinite(o.y) &&
+    Math.abs(o.x) <= 8000 &&
+    Math.abs(o.y) <= 8000
+  );
+}
+
+function mergeOffset(base, saved) {
+  const merged = { ...base, ...(saved || {}) };
+  return isSaneOffset(merged) ? merged : { ...base };
+}
+
 function mergeSettings(saved) {
   const base = defaultSettings();
   if (!saved || typeof saved !== "object") return base;
@@ -179,9 +196,9 @@ function mergeSettings(saved) {
     ...base,
     ...saved,
     offsets: {
-      right: { ...base.offsets.right, ...(saved.offsets?.right || {}) },
-      bottom: { ...base.offsets.bottom, ...(saved.offsets?.bottom || {}) },
-      center: { ...base.offsets.center, ...(saved.offsets?.center || {}) },
+      right: mergeOffset(base.offsets.right, saved.offsets?.right),
+      bottom: mergeOffset(base.offsets.bottom, saved.offsets?.bottom),
+      center: mergeOffset(base.offsets.center, saved.offsets?.center),
     },
   };
 }

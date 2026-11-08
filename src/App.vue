@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { Menu, MenuItem, PredefinedMenuItem, Submenu } from "@tauri-apps/api/menu";
 import {
   enable as enableAutostart,
   disable as disableAutostart,
@@ -33,6 +34,9 @@ import {
   removeItem,
   restoreItem,
   moveItem,
+  removeTab,
+  moveTab,
+  isSaneOffset,
   MAX_TABS,
 } from "./store";
 import { prefetch, clearLocal, pruneOrphans } from "./extractedIcons";
@@ -119,20 +123,24 @@ const matches = computed(() => {
   return out;
 });
 
-/** 격자에 실제로 그릴 목록 */
-const shown = computed(() => (searching.value ? matches.value : items.value));
+/** 검색어가 있을 때만 검색 결과를 보여줍니다. 칸만 열어둔 상태에서는
+    지금 탭을 그대로 둡니다. 안 그러면 타이핑을 시작하기 전까지 비어 보입니다. */
+const filtering = computed(() => searching.value && query.value.trim() !== "");
 
-async function openSearch() {
-  if (searching.value) return;
-  searching.value = true;
+/** 격자에 실제로 그릴 목록 */
+const shown = computed(() => (filtering.value ? matches.value : items.value));
+
+function openSearch() {
   editing.value = false;
-  await nextTick();
+  searching.value = true;
+  // 같은 이벤트 안에서 바로 포커스를 줍니다. (입력칸 주석 참고)
   searchInput.value?.focus();
 }
 
 function closeSearch() {
   searching.value = false;
   query.value = "";
+  searchInput.value?.blur();
 }
 const preset = computed(() => spec(state.settings.preset));
 const axis = computed(() => preset.value.axis);
@@ -216,7 +224,7 @@ async function applyLayout() {
     const s = state.settings;
     const size = windowSize(
       area.value,
-      searching.value ? matches.value.length : undefined
+      filtering.value ? matches.value.length : undefined
     );
 
     // 항목 편집 시트가 열려 있으면 최소한의 세로를 확보합니다.
@@ -301,14 +309,51 @@ async function applyAutostart() {
    항목 조작
    --------------------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------------------
+   실행
+   ---------------------------------------------------------------------------
+   바탕화면 아이콘은 더블클릭이 습관이라, 한 번 클릭으로 실행하는 이 런처에서
+   두 번 실행되곤 했습니다. 같은 항목을 곧바로 다시 누르면 무시하고,
+   누른 순간 아이콘이 튀어 올라 실행됐다는 걸 보여줍니다.
+   --------------------------------------------------------------------------- */
+
+const REPEAT_GUARD = 1500;
+let lastLaunch = { id: "", at: 0 };
+const launchedId = ref("");
+let launchedTimer = null;
+
 function openItem(item) {
-  invoke("launch", { path: item.path }).catch((e) => {
-    flash(`실행하지 못했습니다: ${e}`);
-  });
+  const now = Date.now();
+  if (lastLaunch.id === item.id && now - lastLaunch.at < REPEAT_GUARD) return;
+  lastLaunch = { id: item.id, at: now };
+
+  launchedId.value = item.id;
+  if (launchedTimer) clearTimeout(launchedTimer);
+  launchedTimer = setTimeout(() => (launchedId.value = ""), 600);
+
+  invoke("launch", { path: item.path })
+    .then(() => {
+      if (searching.value) closeSearch();
+      // 오버레이는 불러내서 하나 실행하고 끝나는 용도입니다.
+      if (state.settings.mode === "overlay") {
+        setTimeout(() => invoke("hide_window").catch(() => {}), 160);
+      }
+    })
+    .catch((e) => {
+      lastLaunch = { id: "", at: 0 };
+      flash(`실행하지 못했습니다: ${e}`);
+    });
+}
+
+/** 항목이 들어 있는 탭. 검색 결과는 여러 탭에서 오므로 활성 탭으로 단정할 수 없습니다. */
+function ownerOf(item) {
+  return state.tabs.find((t) => t.items.some((it) => it.id === item.id));
 }
 
 function onRemove(item) {
-  const undo = removeItem(state.activeTabId, item.id);
+  const owner = ownerOf(item);
+  if (!owner) return;
+  const undo = removeItem(owner.id, item.id);
   missing.value.delete(item.id);
   if (!undo) return;
 
@@ -329,15 +374,16 @@ function onMove(from, to) {
   moveItem(state.activeTabId, from, to);
 }
 
-/** 타일을 탭 위로 끌어다 놓아 옮깁니다. */
+/** 항목을 다른 탭으로 옮깁니다. 끌어다 놓기와 우클릭 메뉴가 같이 씁니다. */
 function onDropOnTab(tabId, item) {
-  if (!item || tabId === state.activeTabId) return;
+  if (!item) return;
   const to = state.tabs.find((t) => t.id === tabId);
-  if (!to) return;
-  const from = state.tabs.find((t) =>
-    t.items.some((it) => it.id === item.id)
-  );
-  if (!from) return;
+  const from = ownerOf(item);
+  if (!to || !from || from.id === to.id) return;
+  if (to.items.some((it) => it.path === item.path)) {
+    flash(`${to.name} 탭에 이미 있는 항목입니다`);
+    return;
+  }
   const i = from.items.findIndex((it) => it.id === item.id);
   const [moved] = from.items.splice(i, 1);
   to.items.push(moved);
@@ -370,8 +416,7 @@ async function registerPaths(paths) {
 }
 
 /** 경로가 사라진 항목의 대상만 바꿉니다. 이름·아이콘은 그대로 둡니다. */
-async function relocateItem() {
-  const item = editingItem.value;
+async function relocateItem(item = editingItem.value) {
   if (!item) return;
   try {
     const picked = await openDialog({
@@ -403,6 +448,193 @@ async function browseFiles() {
     await registerPaths(Array.isArray(picked) ? picked : [picked]);
   } catch (e) {
     flash(`파일을 고르지 못했습니다: ${e}`);
+  }
+}
+
+async function browseFolders() {
+  try {
+    const picked = await openDialog({
+      multiple: true,
+      directory: true,
+      title: "런처에 추가할 폴더 고르기",
+    });
+    if (!picked) return;
+    await registerPaths(Array.isArray(picked) ? picked : [picked]);
+  } catch (e) {
+    flash(`폴더를 고르지 못했습니다: ${e}`);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   우클릭 메뉴
+   ---------------------------------------------------------------------------
+   예전에는 우클릭하면 편집 시트가 떴습니다. 하단 가로 바는 높이가 96px라
+   시트를 담으려고 창이 위로 크게 늘어났다 줄어들었고, 지우기 하나에도
+   그 과정을 거쳐야 했습니다. 지금은 Windows 기본 메뉴를 씁니다.
+   창 밖으로 펼쳐지므로 어느 배치에서든 창 크기가 그대로입니다.
+   --------------------------------------------------------------------------- */
+
+const renamingItemId = ref("");
+const renamingTabId = ref("");
+
+async function popup(entries) {
+  const built = [];
+  for (const e of entries) {
+    if (e === "-") built.push(await PredefinedMenuItem.new({ item: "Separator" }));
+    else if (e.items) built.push(await Submenu.new(e));
+    else built.push(await MenuItem.new(e));
+  }
+  const menu = await Menu.new({ items: built });
+  await menu.popup();
+  // 메뉴 동작은 popup이 끝난 뒤에 도착할 수 있어서 바로 닫지 않습니다.
+  setTimeout(() => menu.close().catch(() => {}), 5000);
+}
+
+async function showItemMenu(item) {
+  if (overlay.value) return;
+  const owner = ownerOf(item);
+  if (!owner) return;
+  const others = state.tabs.filter((t) => t.id !== owner.id);
+  const isUrl = item.kind === "url";
+
+  const entries = [{ text: "열기", action: () => openItem(item) }];
+  if (!isUrl) {
+    entries.push({
+      text: "파일 위치 열기",
+      action: () =>
+        invoke("reveal", { path: item.path }).catch((e) =>
+          flash(`위치를 열지 못했습니다: ${e}`)
+        ),
+    });
+  }
+  if (missing.value.has(item.id)) {
+    entries.push({ text: "새 위치 찾기…", action: () => relocateItem(item) });
+  }
+  entries.push("-");
+  entries.push({ text: "이름 바꾸기", action: () => startItemRename(item) });
+  if (others.length) {
+    entries.push({
+      text: "다른 탭으로",
+      items: others.map((t) => ({
+        text: t.name,
+        action: () => onDropOnTab(t.id, item),
+      })),
+    });
+  }
+  entries.push({
+    text: isUrl ? "주소 · 아이콘 바꾸기…" : "아이콘 바꾸기…",
+    action: () => openEditor(item),
+  });
+  entries.push("-");
+  entries.push({ text: "삭제", action: () => onRemove(item) });
+
+  try {
+    await popup(entries);
+  } catch (e) {
+    // 메뉴를 못 띄우면 예전처럼 시트로 엽니다.
+    console.error("메뉴 실패", e);
+    openEditor(item);
+  }
+}
+
+function startItemRename(item) {
+  const owner = ownerOf(item);
+  if (!owner) return;
+  if (searching.value) closeSearch();
+  editing.value = false;
+  state.activeTabId = owner.id;
+  holdSync();
+  renamingItemId.value = item.id;
+}
+
+async function finishItemRename(item, value) {
+  const name = (value || "").trim();
+  if (item && name && name !== item.name) item.name = name;
+  renamingItemId.value = "";
+  await flushSave();
+  await releaseSync();
+}
+
+async function cancelItemRename() {
+  renamingItemId.value = "";
+  await releaseSync();
+}
+
+async function showTabMenu(t) {
+  if (overlay.value) return;
+  const i = state.tabs.findIndex((x) => x.id === t.id);
+  const n = t.items.length;
+  try {
+    await popup([
+      { text: "이름 바꾸기", action: () => startTabRename(t.id) },
+      { text: "왼쪽으로 옮기기", enabled: i > 0, action: () => moveTab(i, i - 1) },
+      {
+        text: "오른쪽으로 옮기기",
+        enabled: i < state.tabs.length - 1,
+        action: () => moveTab(i, i + 1),
+      },
+      "-",
+      {
+        text: n ? `탭 삭제 (항목 ${n}개 포함)` : "탭 삭제",
+        enabled: state.tabs.length > 1,
+        action: () => deleteTab(t.id),
+      },
+    ]);
+  } catch (e) {
+    console.error("메뉴 실패", e);
+  }
+}
+
+function startTabRename(id) {
+  if (searching.value) closeSearch();
+  state.activeTabId = id;
+  holdSync();
+  renamingTabId.value = id;
+}
+
+async function finishTabRename(id, value) {
+  const t = state.tabs.find((x) => x.id === id);
+  const name = (value || "").trim();
+  if (t && name && name !== t.name) t.name = name;
+  renamingTabId.value = "";
+  await flushSave();
+  await releaseSync();
+}
+
+async function cancelTabRename() {
+  renamingTabId.value = "";
+  await releaseSync();
+}
+
+/** 탭 삭제는 항목까지 같이 사라지므로 되돌릴 수 있게 합니다. */
+function deleteTab(id) {
+  const i = state.tabs.findIndex((t) => t.id === id);
+  if (i < 0) return;
+  const t = state.tabs[i];
+  const wasActive = state.activeTabId === id;
+  if (!removeTab(id)) return;
+  flash(`'${t.name}' 탭 삭제`, {
+    label: "되돌리기",
+    run: () => {
+      if (state.tabs.some((x) => x.id === t.id) || state.tabs.length >= MAX_TABS) return;
+      state.tabs.splice(Math.min(i, state.tabs.length), 0, t);
+      if (wasActive) state.activeTabId = t.id;
+      flash("되돌렸습니다");
+    },
+  });
+}
+
+async function showAddMenu() {
+  if (overlay.value) return;
+  try {
+    await popup([
+      { text: "파일 · 프로그램 추가…", action: browseFiles },
+      { text: "폴더 추가…", action: browseFolders },
+      { text: "웹 링크 추가…", action: () => openOverlay("link") },
+    ]);
+  } catch (e) {
+    console.error("메뉴 실패", e);
+    browseFiles();
   }
 }
 
@@ -480,7 +712,9 @@ function onAddTab() {
     flash(`탭은 최대 ${MAX_TABS}개까지입니다`);
     return;
   }
-  addTab("새 탭");
+  const t = addTab("새 탭");
+  // 「새 탭」으로 남겨두지 않도록 바로 이름을 받습니다.
+  if (t) startTabRename(t.id);
 }
 
 /* ---------------------------------------------------------------------------
@@ -535,11 +769,11 @@ function fingerprint() {
     emptyTab: items.value.length === 0,
     itemCount: state.tabs.reduce((n, t) => n + t.items.length, 0),
     overlayOpen: overlay.value !== null,
-    searching: searching.value,
-    matchCount: searching.value ? matches.value.length : -1,
+    searching: filtering.value,
+    matchCount: filtering.value ? matches.value.length : -1,
     paths: state.tabs
       .flatMap((t) => t.items.map((it) => it.path))
-      .join(" "),
+      .join("\u0000"),
   };
 }
 
@@ -580,6 +814,86 @@ async function applyChanged() {
 
 const unlisteners = [];
 
+/* ---------------------------------------------------------------------------
+   키보드
+   ---------------------------------------------------------------------------
+   단축키로 불러낸 뒤 손을 마우스로 옮기지 않아도 되게 합니다.
+     - 아무 글자나 치면 검색이 열리고 그 글자부터 걸러집니다
+     - 방향키로 고르고 Enter로 실행합니다. 검색 중이면 첫 결과가 골라져 있습니다
+   --------------------------------------------------------------------------- */
+
+const kbdIndex = ref(-1);
+const focusId = computed(() => shown.value[kbdIndex.value]?.id || "");
+
+watch(query, () => {
+  kbdIndex.value = filtering.value && matches.value.length ? 0 : -1;
+});
+watch(
+  () => state.activeTabId,
+  () => {
+    kbdIndex.value = -1;
+  }
+);
+
+function moveFocus(delta) {
+  const n = shown.value.length;
+  if (!n) return;
+  const cur = kbdIndex.value;
+  kbdIndex.value = cur < 0 ? 0 : clamp(cur + delta, 0, n - 1);
+  nextTick(() =>
+    document
+      .querySelector(".tile.kbd")
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" })
+  );
+}
+
+function isTextField(el) {
+  return (
+    !!el &&
+    (el.tagName === "INPUT" ||
+      el.tagName === "TEXTAREA" ||
+      el.tagName === "SELECT" ||
+      el.isContentEditable)
+  );
+}
+
+/** 방향키 · Enter · 바로 검색. 처리했으면 true */
+function onNavKey(e) {
+  if (overlay.value || renamingItemId.value || renamingTabId.value) return false;
+  const inSearch = e.target === searchInput.value;
+  const inField = isTextField(e.target);
+  if (inField && !inSearch) return false;
+  if (e.ctrlKey || e.altKey || e.metaKey) return false;
+
+  // 하단 가로 바는 한 줄이라 위아래도 옆으로 움직입니다.
+  const rowStep = preset.value.cols || 1;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    moveFocus((e.key === "ArrowDown" ? 1 : -1) * rowStep);
+    return true;
+  }
+  // 검색칸 안에서는 좌우가 글자 사이를 움직여야 합니다.
+  if (!inSearch && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
+    e.preventDefault();
+    moveFocus(e.key === "ArrowRight" ? 1 : -1);
+    return true;
+  }
+  if (e.key === "Enter" && shown.value[kbdIndex.value]) {
+    e.preventDefault();
+    openItem(shown.value[kbdIndex.value]);
+    return true;
+  }
+
+  if (inField) return false;
+  // 기본 동작을 막지 않고 포커스만 옮깁니다. 그러면 이 글자부터 입력칸에
+  // 들어갑니다. 한글 입력기가 켜져 있으면 key가 'Process'로 옵니다.
+  if ((e.key.length === 1 && e.key !== " ") || e.key === "Process") {
+    openSearch();
+    return true;
+  }
+  return false;
+}
+
 function onKeydown(e) {
   // Ctrl+1~8 로 탭 바로 가기, Ctrl+Tab 으로 다음 탭
   if (e.ctrlKey && !overlay.value && state.tabs.length) {
@@ -605,11 +919,19 @@ function onKeydown(e) {
     return;
   }
 
+  if (onNavKey(e)) return;
+
   if (e.key !== "Escape") return;
   if (overlay.value) closeOverlay();
   else if (searching.value) closeSearch();
   else if (editing.value) editing.value = false;
+  else if (kbdIndex.value >= 0) kbdIndex.value = -1;
   else if (state.settings.mode === "overlay") invoke("hide_window");
+}
+
+/** 마우스를 쓰기 시작하면 키보드 선택 표시는 걷어냅니다. */
+function onPointerDownAnywhere() {
+  if (kbdIndex.value >= 0) kbdIndex.value = -1;
 }
 
 onMounted(async () => {
@@ -673,15 +995,44 @@ onMounted(async () => {
 
   // 사용자가 창을 끌어 옮긴 만큼을 프리셋 보정값으로 기억합니다.
   unlisteners.push(
-    await getCurrentWindow().onMoved(({ payload }) => {
+    await getCurrentWindow().onMoved(async ({ payload }) => {
       if (placing || overlay.value) return;
-      const scale = area.value.scale || 1;
-      const nx = Math.round(payload.x / scale - basePos.value.x);
-      const ny = Math.round(payload.y / scale - basePos.value.y);
-      const cur = state.settings.offsets[state.settings.preset];
-      if (!cur || cur.x !== nx || cur.y !== ny) {
-        state.settings.offsets[state.settings.preset] = { x: nx, y: ny };
+      // 최소화되면 Windows가 창을 (-32000, -32000)으로 보냅니다. 끌어 옮긴 게
+      // 아닌데 이걸 보정값으로 저장해서 하단 바가 왼쪽 위 구석에 붙었었습니다.
+      if (payload.x <= -30000 || payload.y <= -30000) return;
+      try {
+        if (await getCurrentWindow().isMinimized()) return;
+      } catch {
+        /* 확인 못 하면 좌표 검사만 믿습니다 */
       }
+      const scale = area.value.scale || 1;
+      const next = {
+        x: Math.round(payload.x / scale - basePos.value.x),
+        y: Math.round(payload.y / scale - basePos.value.y),
+      };
+      if (!isSaneOffset(next)) return;
+      const cur = state.settings.offsets[state.settings.preset];
+      if (!cur || cur.x !== next.x || cur.y !== next.y) {
+        state.settings.offsets[state.settings.preset] = next;
+      }
+    })
+  );
+
+  // 단축키로 불러냈을 때. 지난번 검색이나 선택이 남아 있으면 걷어냅니다.
+  unlisteners.push(
+    await listen("launcher://shown", () => {
+      kbdIndex.value = -1;
+      if (searching.value) closeSearch();
+      window.focus();
+    })
+  );
+
+  // 설정 창의 「위치 초기화」
+  unlisteners.push(
+    await listen("launcher://reset-position", async () => {
+      state.settings.offsets[state.settings.preset] = { x: 0, y: 0 };
+      await applyLayout();
+      flash("처음 자리로 되돌렸습니다");
     })
   );
 
@@ -717,6 +1068,7 @@ onMounted(async () => {
   unlisteners.push(await getCurrentWindow().onScaleChanged(scheduleRelayout));
 
   window.addEventListener("keydown", onKeydown);
+  window.addEventListener("pointerdown", onPointerDownAnywhere, true);
   window.addEventListener("beforeunload", flushSave);
 });
 
@@ -724,6 +1076,7 @@ onBeforeUnmount(() => {
   if (dropWatchdog) clearTimeout(dropWatchdog);
   if (toastTimer) clearTimeout(toastTimer);
   if (relayoutTimer) clearTimeout(relayoutTimer);
+  if (launchedTimer) clearTimeout(launchedTimer);
   unlisteners.forEach((un) => {
     try {
       un();
@@ -732,6 +1085,7 @@ onBeforeUnmount(() => {
     }
   });
   window.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("pointerdown", onPointerDownAnywhere, true);
   window.removeEventListener("beforeunload", flushSave);
 });
 
@@ -754,17 +1108,23 @@ watch(
   >
     <!-- 탭 바 -->
     <header class="tabbar" :inert="overlay !== null" data-tauri-drag-region>
-      <!-- 검색 중에는 탭 바 자리를 입력칸이 씁니다 -->
+      <!-- 검색 중에는 탭 바 자리를 입력칸이 씁니다.
+           입력칸은 늘 만들어 두고 감춰만 둡니다. 첫 글자를 누른 그 순간에
+           포커스를 줘야 이어서 빠르게 친 글자(그리고 한글 첫 글자)가
+           입력칸으로 들어갑니다. 그때 가서 만들면 앞 글자들이 버려집니다. -->
+      <input
+        ref="searchInput"
+        v-model="query"
+        class="search-input"
+        :class="{ standby: !searching }"
+        :tabindex="searching ? 0 : -1"
+        :aria-hidden="!searching"
+        type="text"
+        placeholder="이름으로 찾기"
+        spellcheck="false"
+        @keydown.escape.stop="closeSearch"
+      />
       <template v-if="searching">
-        <input
-          ref="searchInput"
-          v-model="query"
-          class="search-input"
-          type="text"
-          placeholder="이름으로 찾기"
-          spellcheck="false"
-          @keydown.escape="closeSearch"
-        />
         <button class="head-btn" title="검색 끝내기" @click="closeSearch">
           닫기
         </button>
@@ -775,7 +1135,12 @@ watch(
         :tabs="state.tabs"
         :active-id="state.activeTabId"
         :drop-target="dragOverTab"
+        :renaming-id="renamingTabId"
         @select="state.activeTabId = $event"
+        @menu="showTabMenu"
+        @rename-start="startTabRename"
+        @rename-commit="finishTabRename"
+        @rename-cancel="cancelTabRename"
       />
 
       <button class="head-btn" title="찾기 (Ctrl+F)" @click="openSearch">
@@ -812,24 +1177,31 @@ watch(
     <main class="body" :inert="overlay !== null">
       <ItemGrid
         v-if="shown.length"
-        :key="searching ? 'search' : state.activeTabId"
+        :key="filtering ? 'search' : state.activeTabId"
         :items="shown"
         :columns="preset.cols"
         :cell-w="preset.cellW"
         :cell-h="cellHeight()"
         :icon-box="preset.iconBox"
         :name-max="preset.nameMax"
-        :editing="editing && !searching"
+        :editing="editing && !filtering"
+        :reorderable="!filtering"
         :show-names="state.settings.showNames"
         :missing="missing"
+        :focus-id="focusId"
+        :launched-id="launchedId"
+        :renaming-id="renamingItemId"
         @open="openItem"
         @edit="openEditor"
+        @menu="showItemMenu"
+        @rename-commit="finishItemRename"
+        @rename-cancel="cancelItemRename"
         @remove="onRemove"
         @move="onMove"
         @over-tab="dragOverTab = $event"
         @drop-on-tab="onDropOnTab"
       />
-      <div v-else-if="searching" class="no-match">
+      <div v-else-if="filtering" class="no-match">
         <span><strong>{{ query }}</strong>에 맞는 항목이 없습니다</span>
       </div>
       <EmptyState
@@ -842,30 +1214,31 @@ watch(
 
     <!-- 푸터 -->
     <footer class="footer" :inert="overlay !== null">
-      <span class="status" data-tauri-drag-region>
-        <template v-if="searching">
-          {{ matches.length }}개 찾음
-        </template>
-        <template v-else-if="editing">끌어서 순서 변경 · 눌러서 이름 수정</template>
-        <template v-else-if="items.length">
-          {{ items.length }}개 · 끌어다 놓아 추가
-        </template>
+      <span
+        class="status"
+        data-tauri-drag-region
+        title="끌어다 놓아 추가 · 우클릭으로 메뉴 · 끌어서 순서 변경 · 글자를 치면 검색"
+      >
+        <template v-if="filtering">{{ matches.length }}개 찾음</template>
+        <template v-else-if="searching">이름을 입력하세요</template>
+        <template v-else-if="editing">✕로 삭제</template>
+        <template v-else-if="items.length">{{ items.length }}개</template>
         <template v-else>끌어다 놓아 추가</template>
       </span>
 
       <button
-        v-if="editing"
-        class="icon-btn"
-        title="웹 링크 추가"
-        @click="openOverlay('link')"
+        class="foot-btn"
+        title="추가 — 파일 · 폴더 · 웹 링크 (창 위로 끌어다 놓아도 됩니다)"
+        @click="showAddMenu"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="1.8" stroke-linecap="round" v-html="UI_ICONS.plus" />
+        <span class="foot-label">추가</span>
       </button>
       <button
         class="foot-btn"
         :class="{ on: editing }"
-        :title="editing ? '편집 끝내기' : '편집 — 삭제 · 순서 변경 · 이름 수정'"
+        :title="editing ? '편집 끝내기' : '편집 — 여러 개를 한꺼번에 지울 때'"
         @click="editing = !editing"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1051,6 +1424,17 @@ watch(
   border: 1px solid rgb(var(--accent) / 0.55);
   outline: none;
   font-size: var(--fs-caption);
+}
+/* 검색 전에는 자리만 차지하지 않게 감춰 둡니다. display:none이면
+   포커스를 줄 수 없어서 투명 · 크기 0으로 둡니다. */
+.search-input.standby {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 .search-input::placeholder {
   color: rgb(var(--text-faint));

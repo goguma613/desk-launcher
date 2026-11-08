@@ -1,7 +1,7 @@
 /**
  * 릴리스 준비 — 빌드 산출물에서 `latest.json` 을 만듭니다.
  *
- *   npm run tauri build          (TAURI_SIGNING_PRIVATE_KEY_PATH 를 걸고)
+ *   npm run tauri build          (TAURI_SIGNING_PRIVATE_KEY 에 키 내용을 넣고)
  *   node scripts/release.mjs
  *   gh release create v0.1.0 ... (아래에 출력되는 명령 그대로)
  *

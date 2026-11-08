@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import AppIcon from "./AppIcon.vue";
 import { UI_ICONS } from "../icons";
 
@@ -14,9 +14,66 @@ const props = defineProps({
   editing: { type: Boolean, default: false },
   showNames: { type: Boolean, default: true },
   missing: { type: Object, default: () => new Set() },
+  /** 끌어서 순서를 바꿀 수 있는지. 여러 탭이 섞인 검색 결과에서는 끕니다. */
+  reorderable: { type: Boolean, default: true },
+  /** 키보드로 고른 항목 */
+  focusId: { type: String, default: "" },
+  /** 방금 실행한 항목. 눌렸다는 반응을 잠깐 보여줍니다. */
+  launchedId: { type: String, default: "" },
+  /** 이름을 고치는 중인 항목 */
+  renamingId: { type: String, default: "" },
 });
 
-const emit = defineEmits(["open", "edit", "remove", "move", "over-tab", "drop-on-tab"]);
+const emit = defineEmits([
+  "open",
+  "edit",
+  "menu",
+  "remove",
+  "move",
+  "over-tab",
+  "drop-on-tab",
+  "rename-commit",
+  "rename-cancel",
+]);
+
+/* ---------------------------------------------------------------------------
+   이름 바로 고치기
+   ---------------------------------------------------------------------------
+   편집 시트를 띄우면 하단 가로 바는 창이 위로 크게 늘어났다 줄어듭니다.
+   이름만 바꾸려는 거라면 타일 안에서 끝내는 게 맞습니다.
+   --------------------------------------------------------------------------- */
+
+const renameValue = ref("");
+const renameInput = ref(null);
+let renameDone = false;
+
+watch(
+  () => props.renamingId,
+  async (id) => {
+    if (!id) return;
+    const item = props.items.find((it) => it.id === id);
+    renameValue.value = item ? item.name : "";
+    renameDone = false;
+    await nextTick();
+    const el = Array.isArray(renameInput.value) ? renameInput.value[0] : renameInput.value;
+    el?.focus();
+    el?.select();
+    el?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  },
+  { immediate: true }
+);
+
+function commitRename(item) {
+  if (renameDone) return;
+  renameDone = true;
+  emit("rename-commit", item, renameValue.value);
+}
+
+function cancelRename() {
+  if (renameDone) return;
+  renameDone = true;
+  emit("rename-cancel");
+}
 
 const rowMode = computed(() => props.columns === 0);
 const gridEl = ref(null);
@@ -72,7 +129,10 @@ function nearestIndex(x, y) {
 }
 
 function onPointerDown(e, index) {
-  if (!props.editing || e.button !== 0) return;
+  // 편집 모드가 아니어도 끌어서 순서를 바꿀 수 있습니다. 5px 넘게 움직여야
+  // 끌기로 치므로 그냥 누르면 지금처럼 실행됩니다.
+  if (!props.reorderable || e.button !== 0) return;
+  if (props.renamingId && props.items[index]?.id === props.renamingId) return;
   hideTip();
   pendingIndex = index;
   startX = e.clientX;
@@ -149,6 +209,7 @@ function onPointerUp() {
 
 function onTileClick(item) {
   if (suppressClick) return;
+  if (item.id === props.renamingId) return;
   if (props.editing) emit("edit", item);
   else emit("open", item);
 }
@@ -219,28 +280,50 @@ onBeforeUnmount(() => {
     :class="{ row: rowMode, editing, dragging: drag.active }"
     :style="gridStyle"
   >
-    <button
+    <!-- 이름을 타일 안에서 고치려면 입력칸이 들어가야 하는데, button 안의
+         input은 포커스가 불안정합니다. 그래서 역할만 버튼으로 줍니다. -->
+    <div
       v-for="(item, i) in items"
       :key="item.id"
       class="tile"
+      role="button"
+      tabindex="0"
       :class="[
         dropSide(i),
         {
           lifted: drag.active && drag.from === i,
           gone: missing.has(item.id),
+          kbd: item.id === focusId,
+          launched: item.id === launchedId,
+          renaming: item.id === renamingId,
         },
       ]"
       @pointerdown="onPointerDown($event, i)"
       @pointerenter="onTileEnter($event, item)"
       @pointerleave="hideTip"
       @click="onTileClick(item)"
-      @contextmenu.prevent="emit('edit', item)"
+      @keydown.enter.self.prevent="onTileClick(item)"
+      @contextmenu.prevent="hideTip(); emit('menu', item, $event)"
     >
       <AppIcon :item="item" :box="iconBox" />
-      <span v-if="showNames" class="name">{{ item.name }}</span>
+      <input
+        v-if="item.id === renamingId"
+        ref="renameInput"
+        v-model="renameValue"
+        class="rename"
+        type="text"
+        maxlength="60"
+        spellcheck="false"
+        @click.stop
+        @pointerdown.stop
+        @keydown.enter.stop.prevent="commitRename(item)"
+        @keydown.escape.stop.prevent="cancelRename"
+        @keydown.stop
+        @blur="commitRename(item)"
+      />
+      <span v-else-if="showNames" class="name">{{ item.name }}</span>
 
-      <!-- 타일 자체가 button이라 버튼을 겹칠 수 없습니다.
-           역할과 탭 순서만 주어 키보드로도 닿게 합니다. -->
+      <!-- 타일 안에 버튼을 겹치지 않도록 역할과 탭 순서만 줍니다. -->
       <span
         v-if="editing"
         class="remove"
@@ -255,7 +338,7 @@ onBeforeUnmount(() => {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2.6" stroke-linecap="round" v-html="UI_ICONS.close" />
       </span>
-    </button>
+    </div>
 
     <!-- 드래그 중 커서를 따라다니는 카드 -->
     <Teleport to="body">
@@ -325,6 +408,8 @@ onBeforeUnmount(() => {
   padding: 0 var(--space-1);
   min-width: 0;
   border-radius: var(--radius-tile);
+  cursor: pointer;
+  outline: none;
   /* 기본은 배경 없음 */
   background: transparent;
   transition: background var(--dur-leave) var(--ease);
@@ -387,6 +472,48 @@ onBeforeUnmount(() => {
 }
 .grid.editing .tile:active {
   cursor: grabbing;
+}
+
+/* ---- 키보드 선택 · 실행 반응 · 이름 고치기 ----------------------------- */
+
+.tile.kbd,
+.tile:focus-visible {
+  background: rgb(var(--tile) / var(--tile-alpha-hover));
+  box-shadow: inset 0 0 0 1.5px rgb(var(--accent) / 0.7);
+}
+
+/* 눌렀다는 걸 알려야 더블클릭으로 두 번 실행하지 않습니다 */
+.tile.launched :deep(.app-icon) {
+  animation: launch-pop 520ms var(--ease);
+}
+@keyframes launch-pop {
+  0% {
+    transform: scale(0.9);
+  }
+  45% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.rename {
+  width: var(--name-max);
+  max-width: 100%;
+  height: 20px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid rgb(var(--accent) / 0.7);
+  background: rgb(var(--panel-raise));
+  outline: none;
+  font-size: var(--fs-name);
+  line-height: 18px;
+  text-align: center;
+  color: rgb(var(--text));
+}
+.tile.renaming {
+  background: rgb(var(--tile) / var(--tile-alpha-hover));
 }
 
 .remove {

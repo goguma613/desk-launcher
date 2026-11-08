@@ -73,6 +73,11 @@ fn apply_layer(window: &Window, bottom: bool) -> Result<(), String> {
             SWP_NOSIZE,
         };
 
+        // Win+D(바탕화면 보기)는 창을 최소화하지 않고 바탕화면 층을 맨 위로
+        // 올린다. 그래서 맨 아래에 있는 이 위젯도 그 밑에 가려진다.
+        // 바탕화면 창(Progman)을 소유자로 두면 Win+D에도 남지만, 그 뒤로
+        // 일반 창들 위에 떠 버려 바탕화면 고정의 전제가 깨졌다. (v0.3.0 개발 중 시험)
+        // 가려진 동안은 단축키로 불러내면 된다.
         let hwnd = hwnd_of(window)?;
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
 
@@ -323,6 +328,40 @@ fn launch(app: AppHandle, path: String) -> Result<(), String> {
             .open_path(&path, None::<&str>)
             .map_err(|e| e.to_string())
     }
+}
+
+/// 탐색기에서 항목이 있는 폴더를 열고 그 파일을 선택해 둔다.
+#[tauri::command(async)]
+fn reveal(app: AppHandle, path: String) -> Result<(), String> {
+    if is_url(&path) {
+        return Err("웹 링크는 파일 위치가 없습니다".into());
+    }
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| e.to_string())
+}
+
+/// 바탕화면 고정 모드에서 최소화된 위젯을 활성화하지 않고 제자리로 되돌린다.
+///
+/// Win+M(모두 최소화) 같은 동작이 이 창까지 최소화한다. 바탕화면 위젯이
+/// 그렇게 사라지면 단축키로만 되찾을 수 있다. 게다가 최소화하면 Windows가 창을
+/// (-32000, -32000)으로 보내는데, 프런트엔드가 그걸 사용자가 끌어 옮긴 것으로
+/// 알고 위치 보정값으로 저장해 하단 바가 화면 왼쪽 위 구석에 붙어 버렸다.
+fn restore_pinned(window: &Window) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+        if let Ok(hwnd) = hwnd_of(window) {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window.unminimize();
+    }
+    let _ = apply_layer(window, true);
 }
 
 #[derive(Serialize)]
@@ -847,6 +886,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             launch,
+            reveal,
             inspect_paths,
             read_image_data_url,
             icons_for,
@@ -907,6 +947,23 @@ pub fn run() {
                     // 시스템이 z-order를 올린 뒤에 내려야 해서 한 박자 늦춘다.
                     std::thread::sleep(std::time::Duration::from_millis(80));
                     let _ = apply_layer(&win, true);
+                });
+            }
+            // 바탕화면 고정 모드에서 최소화되면 곧바로 되살린다. (restore_pinned 참고)
+            WindowEvent::Resized(_) => {
+                if window.label() != "main" || !is_pinned(window) {
+                    return;
+                }
+                if !window.is_minimized().unwrap_or(false) {
+                    return;
+                }
+                let win = window.clone();
+                std::thread::spawn(move || {
+                    // 탐색기가 바탕화면 보기를 끝낸 뒤에 되살려야 다시 접히지 않는다.
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    if win.is_minimized().unwrap_or(false) {
+                        restore_pinned(&win);
+                    }
                 });
             }
             // 불러낸 창이 포커스를 잃으면 제자리(맨 아래)로 돌려보낸다.
