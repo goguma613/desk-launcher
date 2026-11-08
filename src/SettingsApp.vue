@@ -57,6 +57,13 @@ async function checkForUpdate() {
   }
 }
 
+const updateFailed = computed(
+  () => !!updateState.value && !["checking", "none", "found", "installing"].includes(updateState.value)
+);
+const updateTitle = computed(() =>
+  updateFailed.value ? updateState.value : "눌러서 업데이트 확인"
+);
+
 async function installUpdate() {
   if (!update.value) return;
   updateState.value = "installing";
@@ -68,10 +75,21 @@ async function installUpdate() {
   }
 }
 
-const lightTheme = computed({
-  get: () => state.settings.theme === "light",
-  set: (on) => (state.settings.theme = on ? "light" : "dark"),
-});
+const presetHint = computed(
+  () => PRESETS.find((p) => p.key === state.settings.preset)?.hint || ""
+);
+const modeHint = computed(
+  () => MODES.find((m) => m.key === state.settings.mode)?.hint || ""
+);
+/** 단축키가 하는 일은 모드마다 달라서 지금 모드의 설명만 보여 줍니다. */
+const shortcutHint = computed(() =>
+  state.settings.mode === "overlay"
+    ? "패널을 켜고 끕니다."
+    : "맨 아래 깔린 패널을 앞으로 불러냅니다. 한 번 더 누르거나 다른 곳을 클릭하면 제자리로 돌아갑니다."
+);
+const itemCount = computed(() =>
+  state.tabs.reduce((n, t) => n + t.items.length, 0)
+);
 
 function applyTheme() {
   document.documentElement.dataset.theme = state.settings.theme;
@@ -186,6 +204,22 @@ async function loadMonitors() {
   } catch {
     monitors.value = [];
   }
+}
+
+/**
+ * 실제 모니터만 보여 줍니다. 「주 모니터」 선택지를 따로 두면 주 모니터와 같은
+ * 화면을 가리키는 버튼이 둘이 됩니다.
+ *
+ * 주 모니터를 고르면 이름 대신 ""을 저장해 주 모니터가 바뀔 때 따라갑니다.
+ * 저장된 모니터가 지금 연결돼 있지 않으면 런처는 주 모니터에 뜨므로 그쪽을 켭니다.
+ */
+function monitorOn(m) {
+  const want = state.settings.monitor;
+  if (want === m.name) return true;
+  return m.primary && !monitors.value.some((x) => x.name === want);
+}
+function pickMonitor(m) {
+  state.settings.monitor = m.primary ? "" : m.name;
 }
 
 /** \\.\DISPLAY2 → 「모니터 2」 */
@@ -471,24 +505,28 @@ watch(() => state.settings.opacity, applyOpacity);
 
     <!-- ===================== 설정 본문 ===================== -->
     <div v-if="view === 'main'" class="content">
-      <!-- 배치 -->
+      <!-- 화면 — 배치 · 바 폭 · 모니터 · 표시 모드를 「이름 | 선택지」 한 줄씩 -->
       <section>
-        <span class="field-label">배치</span>
-        <div class="cards">
-          <button
-            v-for="p in PRESETS"
-            :key="p.key"
-            class="card"
-            :class="{ on: state.settings.preset === p.key }"
-            @click="state.settings.preset = p.key"
-          >
-            <span class="shape" :data-shape="p.key" aria-hidden="true"><i></i></span>
-            <span class="card-title">{{ p.label }}</span>
-            <span class="card-hint">{{ p.hint }}</span>
-          </button>
+        <span class="field-label">화면</span>
+
+        <div class="seg-row">
+          <span class="seg-label">배치</span>
+          <div class="seg">
+            <button
+              v-for="p in PRESETS"
+              :key="p.key"
+              :class="{ on: state.settings.preset === p.key }"
+              @click="state.settings.preset = p.key"
+            >
+              <span class="shape" :data-shape="p.key" aria-hidden="true"><i></i></span>
+              {{ p.label }}
+            </button>
+          </div>
         </div>
+        <p class="seg-hint">{{ presetHint }}</p>
+
         <div v-if="state.settings.preset === 'bottom'" class="seg-row">
-          <span class="seg-label">하단 바 폭</span>
+          <span class="seg-label">바 폭</span>
           <div class="seg">
             <button
               :class="{ on: !state.settings.barFit }"
@@ -505,50 +543,46 @@ watch(() => state.settings.opacity, applyOpacity);
             </button>
           </div>
         </div>
+
         <div v-if="monitors.length > 1" class="seg-row">
           <span class="seg-label">모니터</span>
           <div class="seg">
             <button
-              :class="{ on: !state.settings.monitor }"
-              title="주 모니터가 바뀌면 따라갑니다"
-              @click="state.settings.monitor = ''"
-            >
-              주 모니터
-            </button>
-            <button
               v-for="(m, i) in monitors"
               :key="m.name"
-              :class="{ on: state.settings.monitor === m.name }"
-              :title="`${m.width}×${m.height}${m.primary ? ' · 지금 주 모니터' : ''}`"
-              @click="state.settings.monitor = m.name"
+              :class="{ on: monitorOn(m) }"
+              :title="m.primary ? '주 모니터 — 주 모니터가 바뀌면 따라갑니다' : ''"
+              @click="pickMonitor(m)"
             >
-              {{ monitorLabel(m, i) }}
+              {{ monitorLabel(m, i) }}<template v-if="m.primary"> · 주</template>
               <em>{{ m.width }}×{{ m.height }}</em>
             </button>
           </div>
         </div>
-        <div class="place-row">
-          <p class="note">패널은 빈 곳을 끌어 옮길 수 있습니다. 옆 모니터로 끌면 그 모니터에 자리를 잡습니다.</p>
-          <button class="btn" @click="resetPosition">위치 초기화</button>
-        </div>
-      </section>
 
-      <!-- 표시 모드 -->
-      <section>
-        <span class="field-label">표시 모드</span>
-        <div class="stack">
+        <div class="seg-row">
+          <span class="seg-label">표시 모드</span>
+          <div class="seg">
+            <button
+              v-for="m in MODES"
+              :key="m.key"
+              :class="{ on: state.settings.mode === m.key }"
+              @click="state.settings.mode = m.key"
+            >
+              {{ m.label }}
+            </button>
+          </div>
+        </div>
+        <p class="seg-hint">{{ modeHint }}</p>
+
+        <div class="seg-row">
+          <span class="seg-label">위치</span>
           <button
-            v-for="m in MODES"
-            :key="m.key"
-            class="option"
-            :class="{ on: state.settings.mode === m.key }"
-            @click="state.settings.mode = m.key"
+            class="btn small"
+            title="패널은 빈 곳을 끌어 옮길 수 있습니다. 옆 모니터로 끌면 그 모니터에 자리를 잡습니다."
+            @click="resetPosition"
           >
-            <span class="dot" />
-            <span>
-              <strong>{{ m.label }}</strong>
-              <em>{{ m.hint }}</em>
-            </span>
+            기본 자리로
           </button>
         </div>
       </section>
@@ -557,36 +591,37 @@ watch(() => state.settings.opacity, applyOpacity);
       <section>
         <span class="field-label">전역 단축키</span>
         <ShortcutInput v-model="state.settings.shortcut" />
-        <p class="note">
-          오버레이 모드에서는 창을 켜고 끕니다. 바탕화면 고정 모드에서는 맨 아래
-          깔린 창을 잠깐 앞으로 불러내고, 다른 곳을 클릭하면 제자리로 돌아갑니다.
-        </p>
+        <p class="note">{{ shortcutHint }}</p>
       </section>
 
       <!-- 일반 -->
       <section>
         <span class="field-label">일반</span>
 
-        <label class="switch">
-          <input v-model="state.settings.autostart" type="checkbox" />
-          <span>Windows 시작할 때 자동 실행</span>
-        </label>
+        <div class="seg-row">
+          <span class="seg-label">테마</span>
+          <div class="seg">
+            <button
+              :class="{ on: state.settings.theme !== 'light' }"
+              @click="state.settings.theme = 'dark'"
+            >
+              다크
+            </button>
+            <button
+              :class="{ on: state.settings.theme === 'light' }"
+              @click="state.settings.theme = 'light'"
+            >
+              라이트
+            </button>
+          </div>
+        </div>
 
-        <label class="switch">
-          <input v-model="state.settings.showNames" type="checkbox" />
-          <span>항목 이름 표시</span>
-        </label>
-
-        <label class="switch">
-          <input v-model="lightTheme" type="checkbox" />
-          <span>라이트 테마</span>
-        </label>
-
-        <div class="control">
-          <label for="opacity">배경 불투명도</label>
+        <div class="seg-row">
+          <label class="seg-label" for="opacity">불투명도</label>
           <input
             id="opacity"
             v-model.number="state.settings.opacity"
+            class="range"
             type="range"
             min="0.5"
             max="1"
@@ -594,55 +629,23 @@ watch(() => state.settings.opacity, applyOpacity);
           />
           <output>{{ Math.round(state.settings.opacity * 100) }}%</output>
         </div>
-      </section>
 
-      <!-- 업데이트 -->
-      <section>
-        <span class="field-label">업데이트</span>
-        <div class="update-row">
-          <span class="update-now">현재 v{{ version || "…" }}</span>
-          <button
-            class="btn"
-            :disabled="updateState === 'checking' || updateState === 'installing'"
-            @click="checkForUpdate"
-          >
-            {{ updateState === "checking" ? "확인 중…" : "업데이트 확인" }}
-          </button>
-          <button
-            v-if="update"
-            class="btn primary"
-            :disabled="updateState === 'installing'"
-            @click="installUpdate"
-          >
-            v{{ update.version }} 설치
-          </button>
+        <div class="seg-row">
+          <span class="seg-label">탭</span>
+          <span class="tab-sum">탭 {{ state.tabs.length }}개 · 항목 {{ itemCount }}개</span>
+          <button class="btn small" @click="view = 'tabs'">탭 편집</button>
         </div>
-        <p v-if="updateState === 'none'" class="note">최신 버전입니다.</p>
-        <p v-else-if="updateState === 'installing'" class="note">
-          내려받는 중입니다. 끝나면 설치 프로그램이 뜨고 런처가 잠시 꺼집니다.
-        </p>
-        <p v-else-if="update" class="note">
-          <strong>v{{ update.version }}</strong> 이 있습니다.
-          <template v-if="update.notes">{{ update.notes }}</template>
-        </p>
-        <p
-          v-else-if="updateState && updateState !== 'checking'"
-          class="err"
-        >
-          {{ updateState }}
-        </p>
-      </section>
 
-      <!-- 탭 -->
-      <section>
-        <span class="field-label">탭</span>
-        <div class="chips">
-          <span v-for="t in state.tabs" :key="t.id" class="chip">
-            {{ t.name }}
-            <em>{{ t.items.length }}</em>
-          </span>
+        <div class="switches">
+          <label class="switch">
+            <input v-model="state.settings.autostart" type="checkbox" />
+            <span>Windows 시작할 때 자동 실행</span>
+          </label>
+          <label class="switch">
+            <input v-model="state.settings.showNames" type="checkbox" />
+            <span>항목 이름 표시</span>
+          </label>
         </div>
-        <button class="btn" @click="view = 'tabs'">탭 편집</button>
       </section>
     </div>
 
@@ -772,20 +775,30 @@ watch(() => state.settings.opacity, applyOpacity);
       <button class="linkish" @click="openConfigDir">설정 파일 폴더</button>
       <button class="linkish" @click="refreshIcons">아이콘 새로 고침</button>
       <span class="busy">{{ busy }}</span>
-      <!-- 업데이트 섹션은 스크롤 아래에 있어 못 보고 지나치기 쉽습니다.
-           새 버전이 있으면 늘 보이는 이 자리에서 바로 설치할 수 있게 합니다. -->
+      <!-- 업데이트는 여기 한 곳에서. 버전을 누르면 다시 확인하고,
+           새 버전이 있으면 그 자리가 설치 버튼이 됩니다. -->
       <span v-if="!busy && version" class="version">
         <button
           v-if="update && updateState === 'found'"
           class="update-chip"
-          :title="`지금 v${version} → 새 버전 v${update.version}`"
+          :title="`지금 v${version} → 새 버전 v${update.version}${update.notes ? '\n' + update.notes : ''}`"
           @click="installUpdate"
         >
           <i class="chip-dot" aria-hidden="true" />
           v{{ update.version }} 설치
         </button>
         <template v-else-if="updateState === 'installing'">설치 중…</template>
-        <template v-else>v{{ version }}</template>
+        <button
+          v-else
+          class="linkish quiet"
+          :disabled="updateState === 'checking'"
+          :title="updateTitle"
+          @click="checkForUpdate"
+        >
+          v{{ version }}<template v-if="updateState === 'checking'"> · 확인 중…</template
+          ><template v-else-if="updateState === 'none'"> · 최신</template
+          ><template v-else-if="updateFailed"> · 확인 실패</template>
+        </button>
       </span>
       <template v-if="confirmQuit">
         <span class="confirm-quit">정말 끌까요?</span>
@@ -853,136 +866,46 @@ section {
   display: block;
 }
 
-/* ---- 배치 카드 -------------------------------------------------------- */
-
-.cards {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-3);
-}
-
-.card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-4) var(--space-3);
-  border-radius: var(--radius-tile);
-  background: rgb(var(--tile) / var(--surface-alpha));
-  border: 1px solid transparent;
-  text-align: center;
-  transition: background var(--dur-hover) var(--ease),
-    border-color var(--dur-hover) var(--ease);
-}
-.card:hover {
-  background: rgb(var(--tile) / var(--surface-alpha-hover));
-}
-.card.on {
-  border-color: rgb(var(--accent-ink));
-  background: rgb(var(--accent) / var(--accent-soft-alpha));
-}
+/* ---- 배치 모양 아이콘 (선택 버튼 안) -------------------------------- */
 
 .shape {
   position: relative;
-  display: block;
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  border-radius: 6px;
-  border: 1px solid rgb(var(--line) / 0.22);
-  background: rgb(var(--tile) / 0.05);
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 13px;
+  border-radius: 3px;
+  border: 1px solid rgb(var(--line) / 0.3);
 }
 .shape i {
   position: absolute;
   display: block;
-  border-radius: 2px;
-  background: rgb(var(--text-dim));
+  border-radius: 1px;
+  background: rgb(var(--text-faint));
 }
-.card.on .shape i {
+.seg button.on .shape {
+  border-color: rgb(var(--accent-ink) / 0.6);
+}
+.seg button.on .shape i {
   background: rgb(var(--accent));
 }
-/* 우측 세로 패널은 가장자리에 밀착합니다 */
 .shape[data-shape="right"] i {
-  top: 10%;
-  bottom: 10%;
-  right: 0;
-  width: 26%;
-  border-radius: 2px 0 0 2px;
+  top: 1px;
+  bottom: 1px;
+  right: 1px;
+  width: 5px;
 }
 .shape[data-shape="bottom"] i {
-  left: 0;
-  right: 0;
-  bottom: 6%;
-  height: 22%;
+  left: 1px;
+  right: 1px;
+  bottom: 1px;
+  height: 3px;
 }
 .shape[data-shape="center"] i {
-  left: 22%;
-  right: 22%;
-  top: 20%;
-  bottom: 20%;
-}
-
-.card-title {
-  font-size: var(--fs-caption);
-  font-weight: 700;
-  line-height: 1.3;
-}
-.card-hint {
-  font-size: 10.5px;
-  line-height: 1.45;
-  color: rgb(var(--text-faint));
-}
-
-/* ---- 모드 ------------------------------------------------------------- */
-
-.stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.option {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-tile);
-  background: rgb(var(--tile) / var(--surface-alpha));
-  border: 1px solid transparent;
-  text-align: left;
-  transition: background var(--dur-hover) var(--ease),
-    border-color var(--dur-hover) var(--ease);
-}
-.option:hover {
-  background: rgb(var(--tile) / var(--surface-alpha-hover));
-}
-.option.on {
-  border-color: rgb(var(--accent-ink));
-  background: rgb(var(--accent) / var(--accent-soft-alpha));
-}
-.option .dot {
-  flex: 0 0 auto;
-  width: 13px;
-  height: 13px;
-  margin-top: 2px;
-  border-radius: var(--radius-pill);
-  border: 1.5px solid rgb(var(--text-faint));
-}
-.option.on .dot {
-  border-color: rgb(var(--accent-ink));
-  box-shadow: inset 0 0 0 3px rgb(var(--accent));
-}
-.option strong {
-  display: block;
-  font-size: 12px;
-  font-weight: 700;
-}
-.option em {
-  display: block;
-  margin-top: 2px;
-  font-style: normal;
-  font-size: var(--fs-caption);
-  line-height: 1.45;
-  color: rgb(var(--text-faint));
+  left: 4px;
+  right: 4px;
+  top: 3px;
+  bottom: 3px;
 }
 
 /* ---- 일반 ------------------------------------------------------------- */
@@ -1003,52 +926,33 @@ section {
   cursor: pointer;
 }
 
-.control {
+.switches {
   display: flex;
-  align-items: center;
-  gap: var(--space-3);
+  flex-wrap: wrap;
+  column-gap: var(--space-6);
   margin-top: var(--space-2);
 }
-.control label {
-  flex: 0 0 90px;
-  font-size: var(--fs-caption);
-  color: rgb(var(--text-dim));
-}
-.control input[type="range"] {
+
+.range {
   flex: 1 1 auto;
   min-width: 0;
   accent-color: rgb(var(--accent-ink));
 }
-.control output {
-  flex: 0 0 44px;
+.seg-row output {
+  flex: 0 0 38px;
   text-align: right;
   font-size: var(--fs-caption);
   font-variant-numeric: tabular-nums;
   color: rgb(var(--text-dim));
 }
-
-/* ---- 탭 칩 ------------------------------------------------------------ */
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  margin-bottom: var(--space-3);
-}
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 11px;
-  border-radius: var(--radius-pill);
-  background: rgb(var(--tile) / var(--surface-alpha));
+.tab-sum {
+  flex: 1 1 auto;
   font-size: var(--fs-caption);
-  color: rgb(var(--text-item));
+  color: rgb(var(--text-dim));
 }
-.chip em {
-  font-style: normal;
-  font-size: 10px;
-  color: rgb(var(--text-faint));
+.btn.small {
+  padding: 5px 11px;
+  font-size: var(--fs-caption);
 }
 
 /* ---- 탭 편집 ---------------------------------------------------------- */
@@ -1185,24 +1089,6 @@ section {
   border-top: 1px solid rgb(var(--line) / var(--divider-alpha));
 }
 
-.update-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-.update-now {
-  flex: 0 0 auto;
-  margin-right: var(--space-2);
-  font-size: var(--fs-caption);
-  font-variant-numeric: tabular-nums;
-  color: rgb(var(--text-dim));
-}
-.update-row .btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
 .version {
   flex: 1 1 auto;
   text-align: right;
@@ -1210,6 +1096,19 @@ section {
   font-size: var(--fs-caption);
   font-variant-numeric: tabular-nums;
   color: rgb(var(--text-faint));
+}
+
+.linkish.quiet {
+  font-size: inherit;
+  color: inherit;
+  text-decoration: none;
+}
+.linkish.quiet:hover:not(:disabled) {
+  color: rgb(var(--text));
+  text-decoration: underline;
+}
+.linkish.quiet:disabled {
+  cursor: default;
 }
 
 .update-chip {
@@ -1278,7 +1177,18 @@ section {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin-top: var(--space-3);
+  min-height: 32px;
+  margin-top: var(--space-2);
+}
+.field-label + .seg-row {
+  margin-top: 0;
+}
+/* 선택한 것의 설명 한 줄. 선택지 열에 맞춰 들여 씁니다. */
+.seg-hint {
+  margin: 3px 0 0 calc(72px + var(--space-3));
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: rgb(var(--text-faint));
 }
 .seg-label {
   flex: 0 0 72px;
@@ -1295,9 +1205,11 @@ section {
 }
 .seg button {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
+  justify-content: center;
   gap: 6px;
   height: 26px;
+  line-height: 1;
   padding: 0 10px;
   border-radius: calc(var(--radius-control) - 2px);
   font-size: var(--fs-caption);
@@ -1323,14 +1235,7 @@ select.text-input {
   cursor: pointer;
 }
 
-.place-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-top: var(--space-3);
-}
-.place-row .note {
+.note {
   margin: 0;
 }
 
