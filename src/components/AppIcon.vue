@@ -101,7 +101,7 @@ const glyph = computed(() => Math.round(props.box * 0.55));
 <template>
   <span
     class="app-icon"
-    :class="{ boxed }"
+    :class="{ boxed, plate: mode === 'favicon' }"
     :style="{ '--box': box + 'px', '--glyph': glyph + 'px' }"
   >
     <img v-if="mode === 'image'" class="shot" :src="custom" alt="" draggable="false" />
@@ -153,6 +153,18 @@ const glyph = computed(() => Math.round(props.box * 0.55));
 .app-icon.boxed {
   background: rgb(var(--panel-raise));
   border-radius: var(--radius-fallback);
+}
+
+/* 파비콘은 사이트가 밝은 배경을 전제로 만든 경우가 많아서(GitHub의 검은
+   고양이 등) 다크 패널에서는 묻힙니다. 다크 테마에서만 밝은 바탕을 깝니다.
+   라이트 테마는 토큰 알파가 0이라 바탕이 없습니다. */
+.app-icon.plate {
+  background: rgb(var(--favicon-plate) / var(--favicon-plate-alpha));
+  border-radius: var(--radius-fallback);
+}
+.app-icon.plate img {
+  width: 64%;
+  height: 64%;
 }
 
 .app-icon img {

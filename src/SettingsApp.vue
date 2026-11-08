@@ -504,7 +504,21 @@ watch(() => state.settings.opacity, applyOpacity);
       <button class="linkish" @click="openConfigDir">설정 파일 폴더</button>
       <button class="linkish" @click="refreshIcons">아이콘 새로 고침</button>
       <span class="busy">{{ busy }}</span>
-      <span v-if="!busy && version" class="version">v{{ version }}</span>
+      <!-- 업데이트 섹션은 스크롤 아래에 있어 못 보고 지나치기 쉽습니다.
+           새 버전이 있으면 늘 보이는 이 자리에서 바로 설치할 수 있게 합니다. -->
+      <span v-if="!busy && version" class="version">
+        <button
+          v-if="update && updateState === 'found'"
+          class="update-chip"
+          :title="`지금 v${version} → 새 버전 v${update.version}`"
+          @click="installUpdate"
+        >
+          <i class="chip-dot" aria-hidden="true" />
+          v{{ update.version }} 설치
+        </button>
+        <template v-else-if="updateState === 'installing'">설치 중…</template>
+        <template v-else>v{{ version }}</template>
+      </span>
       <template v-if="confirmQuit">
         <span class="confirm-quit">정말 끌까요?</span>
         <button class="btn" @click="confirmQuit = false">취소</button>
@@ -926,6 +940,29 @@ section {
   font-size: var(--fs-caption);
   font-variant-numeric: tabular-nums;
   color: rgb(var(--text-faint));
+}
+
+.update-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  background: rgb(var(--accent) / var(--accent-soft-alpha));
+  color: rgb(var(--accent-ink));
+  font-size: var(--fs-caption);
+  font-weight: 700;
+  transition: background var(--dur-hover) var(--ease);
+}
+.update-chip:hover {
+  background: rgb(var(--accent) / calc(var(--accent-soft-alpha) * 2));
+}
+.chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: rgb(var(--accent));
 }
 
 .confirm-quit {

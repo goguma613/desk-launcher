@@ -106,21 +106,94 @@ const searching = ref(false);
 const query = ref("");
 const searchInput = ref(null);
 
+/* 검색 순위
+   Enter가 첫 결과를 바로 실행하므로 순서가 곧 정확도입니다.
+     0  이름이 검색어로 시작
+     1  이름 속 단어가 검색어로 시작 · 머리글자(lol → League of Legends) · 초성
+     2  이름 어딘가에 포함
+     3  초성이 중간에 포함
+     4  파일 이름(확장자 뺀)에 포함 — 폴더 경로는 보지 않습니다.
+        C:\Windows\... 아래 항목이 「win」에 전부 걸리던 문제가 있었습니다.
+   같은 순위면 지금 보고 있는 탭의 항목, 그다음 원래 순서. */
+const CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ";
+// 한글 입력기로 ㄹ, ㄱ 을 연달아 치면 겹받침 ㄺ 하나로 합쳐집니다.
+const SPLIT_JAMO = {
+  ㄳ: "ㄱㅅ", ㄵ: "ㄴㅈ", ㄶ: "ㄴㅎ", ㄺ: "ㄹㄱ", ㄻ: "ㄹㅁ", ㄼ: "ㄹㅂ",
+  ㄽ: "ㄹㅅ", ㄾ: "ㄹㅌ", ㄿ: "ㄹㅍ", ㅀ: "ㄹㅎ", ㅄ: "ㅂㅅ",
+};
+
+function chosungOf(text) {
+  let out = "";
+  for (const ch of text) {
+    const c = ch.charCodeAt(0);
+    out += c >= 0xac00 && c <= 0xd7a3 ? CHO[Math.floor((c - 0xac00) / 588)] : ch;
+  }
+  return out;
+}
+
+/** 단어로 나눕니다. BlueStacks처럼 대문자로 이어 붙인 이름도 나눕니다 (bs). */
+function wordsOf(text) {
+  return text
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[\s\-_.()[\]·,]+/)
+    .filter(Boolean);
+}
+
+function fileNameOf(item) {
+  if (item.kind === "url") {
+    try {
+      return new URL(item.path).hostname;
+    } catch {
+      return item.path;
+    }
+  }
+  const last = item.path.split(/[\\/]/).pop() || "";
+  return last.replace(/\.[^.]+$/, "");
+}
+
+function matchScore(item, q, qCho) {
+  const name = item.name.toLowerCase();
+  if (name.startsWith(q)) return 0;
+  const words = wordsOf(item.name);
+  if (words.some((w) => w.startsWith(q))) return 1;
+  if (name.includes(q)) return 2;
+  if (qCho) {
+    const cho = chosungOf(name);
+    const compact = cho.replace(/\s+/g, "");
+    if (compact.startsWith(qCho)) return 1;
+    const initials = wordsOf(cho).map((w) => w[0]).join("");
+    if (initials.startsWith(qCho)) return 1;
+    if (compact.includes(qCho)) return 3;
+  } else if (q.length >= 2) {
+    const initials = words.map((w) => w[0]).join("");
+    if (initials.startsWith(q)) return 1;
+  }
+  if (fileNameOf(item).toLowerCase().includes(q)) return 4;
+  return -1;
+}
+
 const matches = computed(() => {
   const q = query.value.trim().toLowerCase();
   if (!q) return [];
-  const out = [];
-  for (const t of state.tabs) {
+  const split = [...q].map((c) => SPLIT_JAMO[c] || c).join("");
+  const qCho = /^[ㄱ-ㅎ]+$/.test(split) ? split : null;
+
+  const current = state.tabs.find((t) => t.id === state.activeTabId);
+  const ordered = current
+    ? [current, ...state.tabs.filter((t) => t !== current)]
+    : state.tabs;
+
+  const scored = [];
+  let order = 0;
+  for (const t of ordered) {
     for (const it of t.items) {
-      if (
-        it.name.toLowerCase().includes(q) ||
-        it.path.toLowerCase().includes(q)
-      ) {
-        out.push(it);
-      }
+      const score = matchScore(it, q, qCho);
+      if (score >= 0) scored.push({ it, score, order: order++ });
     }
   }
-  return out;
+  scored.sort((a, b) => a.score - b.score || a.order - b.order);
+  return scored.map((x) => x.it);
 });
 
 /** 검색어가 있을 때만 검색 결과를 보여줍니다. 칸만 열어둔 상태에서는
@@ -177,24 +250,84 @@ function armDropWatchdog() {
   }, 700);
 }
 
+/* 탐색기에서 끌어온 파일을 탭 이름 위에 놓으면 그 탭에 넣습니다.
+   그러려면 탭 바가 드롭 안내에 가려지면 안 되므로, 안내는 항목 영역만 덮습니다. */
+const dropInset = ref({});
+
+function measureDropInset() {
+  const panel = document.querySelector(".panel");
+  const head = panel?.querySelector(".tabbar");
+  const foot = panel?.querySelector(".footer");
+  if (!panel || !head || !foot) {
+    dropInset.value = {};
+    return;
+  }
+  const pr = panel.getBoundingClientRect();
+  const hr = head.getBoundingClientRect();
+  const fr = foot.getBoundingClientRect();
+  dropInset.value =
+    axis.value === "horizontal"
+      ? { left: hr.right - pr.left + "px", right: pr.right - fr.left + "px" }
+      : { top: hr.bottom - pr.top + "px", bottom: pr.bottom - fr.top + "px" };
+}
+
+/** 드롭 좌표(창 물리 픽셀) 아래에 있는 탭 id. 없으면 "" */
+function tabAt(position) {
+  if (!position) return "";
+  const r = window.devicePixelRatio || 1;
+  const el = document.elementFromPoint(position.x / r, position.y / r);
+  return el?.closest?.("[data-tab-id]")?.getAttribute("data-tab-id") || "";
+}
+
+/** 드롭하면 들어갈 탭 이름 */
+const dropTargetName = computed(() => {
+  const id = dragOverTab.value || state.activeTabId;
+  return state.tabs.find((t) => t.id === id)?.name || "";
+});
+
 function endDrop() {
   if (dropWatchdog) {
     clearTimeout(dropWatchdog);
     dropWatchdog = null;
   }
   dropActive.value = false;
+  dragOverTab.value = "";
   dropGuardUntil = Date.now() + 600;
 }
 
 let toastTimer = null;
 const EMPTY_TOAST = { text: "", label: "", run: null };
 
+/* 하단 가로 바는 폭이 화면 전체라, 가운데에 띄우면 왼쪽에 몰린 항목에서
+   한참 떨어진 곳에 「되돌리기」가 뜹니다. 마지막 항목 바로 옆에 띄웁니다. */
+const toastStyle = ref({});
+
+function placeToast() {
+  if (axis.value !== "horizontal") {
+    toastStyle.value = {};
+    return;
+  }
+  const panel = document.querySelector(".panel");
+  if (!panel) return;
+  const pr = panel.getBoundingClientRect();
+  const tiles = panel.querySelectorAll(".body .tile");
+  const anchor = tiles.length
+    ? tiles[tiles.length - 1].getBoundingClientRect().right
+    : panel.querySelector(".tabbar")?.getBoundingClientRect().right ?? pr.left;
+  // 항목이 바 끝까지 차 있으면 오른쪽 끝에서 알림 폭만큼 안쪽으로.
+  const x = Math.min(anchor - pr.left + 16, pr.width - 440);
+  toastStyle.value = { left: Math.max(12, Math.round(x)) + "px" };
+}
+
 /**
  * 알림. 두 번째 인자를 주면 「되돌리기」 같은 버튼이 함께 뜹니다.
  * 버튼이 있으면 읽고 누를 시간이 필요하므로 더 오래 남깁니다.
  */
 function flash(text, action = null) {
+  placeToast();
   toast.value = { text, label: action?.label || "", run: action?.run || null };
+  // 방금 지운 항목처럼 DOM이 바뀌는 중이면 한 박자 뒤에 다시 맞춥니다.
+  nextTick(placeToast);
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(
     () => {
@@ -322,7 +455,7 @@ let lastLaunch = { id: "", at: 0 };
 const launchedId = ref("");
 let launchedTimer = null;
 
-function openItem(item) {
+function openItem(item, { admin = false } = {}) {
   const now = Date.now();
   if (lastLaunch.id === item.id && now - lastLaunch.at < REPEAT_GUARD) return;
   lastLaunch = { id: item.id, at: now };
@@ -331,7 +464,7 @@ function openItem(item) {
   if (launchedTimer) clearTimeout(launchedTimer);
   launchedTimer = setTimeout(() => (launchedId.value = ""), 600);
 
-  invoke("launch", { path: item.path })
+  invoke("launch", { path: item.path, admin })
     .then(() => {
       if (searching.value) closeSearch();
       // 오버레이는 불러내서 하나 실행하고 끝나는 용도입니다.
@@ -341,6 +474,8 @@ function openItem(item) {
     })
     .catch((e) => {
       lastLaunch = { id: "", at: 0 };
+      // UAC 창에서 「아니요」를 누른 것. 사용자가 고른 것이니 알리지 않습니다.
+      if (String(e) === "cancelled") return;
       flash(`실행하지 못했습니다: ${e}`);
     });
 }
@@ -399,14 +534,20 @@ function onDropOnTab(tabId, item) {
   });
 }
 
-async function registerPaths(paths) {
+async function registerPaths(paths, tabId = state.activeTabId) {
   if (!paths.length) return;
   try {
     const infos = await invoke("inspect_paths", { paths });
-    const added = addItems(infos);
+    const added = addItems(infos, tabId);
     const skipped = infos.length - added;
-    if (added && skipped) flash(`${added}개 추가, ${skipped}개는 이미 있음`);
-    else if (added) flash(`${added}개 추가했습니다`);
+    // 다른 탭에 넣었으면 그 탭을 보여줍니다. 안 그러면 들어갔는지 알 수 없습니다.
+    const elsewhere = tabId !== state.activeTabId;
+    if (elsewhere) state.activeTabId = tabId;
+    const where = elsewhere
+      ? `${state.tabs.find((t) => t.id === tabId)?.name || ""} 탭에 `
+      : "";
+    if (added && skipped) flash(`${where}${added}개 추가, ${skipped}개는 이미 있음`);
+    else if (added) flash(`${where}${added}개 추가했습니다`);
     else flash("이미 등록된 항목입니다");
     prefetch(infos.map((i) => i.path));
     checkPaths();
@@ -498,6 +639,13 @@ async function showItemMenu(item) {
   const isUrl = item.kind === "url";
 
   const entries = [{ text: "열기", action: () => openItem(item) }];
+  // 게임 런처 · 시스템 도구처럼 관리자 권한이 필요한 프로그램용
+  if (item.kind === "app") {
+    entries.push({
+      text: "관리자 권한으로 실행",
+      action: () => openItem(item, { admin: true }),
+    });
+  }
   if (!isUrl) {
     entries.push({
       text: "파일 위치 열기",
@@ -976,7 +1124,9 @@ onMounted(async () => {
         // 드롭 직후에도 over가 한 번 더 들어옵니다. 그대로 두면 방금 닫은
         // 오버레이가 곧바로 다시 켜져서 목록이 가려집니다.
         if (overlay.value || Date.now() < dropGuardUntil) return;
+        if (!dropActive.value) measureDropInset();
         dropActive.value = true;
+        dragOverTab.value = tabAt(p.position);
         armDropWatchdog();
         return;
       }
@@ -987,9 +1137,10 @@ onMounted(async () => {
       }
       if (p.type !== "drop") return;
 
+      const target = tabAt(p.position) || state.activeTabId;
       endDrop();
       if (overlay.value) return;
-      await registerPaths(p.paths);
+      await registerPaths(p.paths, target);
     })
   );
 
@@ -1114,7 +1265,7 @@ watch(
            입력칸으로 들어갑니다. 그때 가서 만들면 앞 글자들이 버려집니다. -->
       <input
         ref="searchInput"
-        v-model="query"
+        :value="query"
         class="search-input"
         :class="{ standby: !searching }"
         :tabindex="searching ? 0 : -1"
@@ -1122,6 +1273,7 @@ watch(
         type="text"
         placeholder="이름으로 찾기"
         spellcheck="false"
+        @input="query = $event.target.value"
         @keydown.escape.stop="closeSearch"
       />
       <template v-if="searching">
@@ -1265,19 +1417,22 @@ watch(
 
     <!-- 파일을 창 위로 가져왔을 때 -->
     <Transition name="fade">
-      <div v-if="dropActive" class="drop">
+      <div v-if="dropActive" class="drop" :style="dropInset">
         <div class="drop-inner">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
                stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
                v-html="UI_ICONS.drop" />
-          <span><strong>{{ tab?.name }}</strong> 탭에 추가</span>
+          <span><strong>{{ dropTargetName }}</strong> 탭에 추가</span>
+          <em v-if="state.tabs.length > 1 && !dragOverTab" class="drop-hint">
+            다른 탭 이름 위에 놓으면 그 탭으로
+          </em>
         </div>
       </div>
     </Transition>
 
     <!-- 알림 -->
     <Transition name="fade">
-      <div v-if="toast.text" class="toast">
+      <div v-if="toast.text" class="toast" :style="toastStyle">
         <span class="toast-text">{{ toast.text }}</span>
         <button v-if="toast.label" class="toast-action" @click="runToastAction">
           {{ toast.label }}
@@ -1581,6 +1736,10 @@ watch(
 .drop-inner strong {
   font-weight: 700;
 }
+.drop-hint {
+  font-style: normal;
+  color: rgb(var(--text-faint));
+}
 .panel[data-axis="horizontal"] .drop-inner {
   flex-direction: row;
   gap: var(--space-3);
@@ -1676,8 +1835,15 @@ watch(
 .toast-action:hover {
   background: rgb(var(--accent) / calc(var(--accent-soft-alpha) * 2));
 }
+/* 하단 바에서는 마지막 항목 옆, 세로 가운데 (left는 placeToast가 줍니다) */
 .panel[data-axis="horizontal"] .toast {
-  bottom: 10px;
+  top: 50%;
+  bottom: auto;
+  transform: translateY(-50%);
+}
+.panel[data-axis="horizontal"] .toast.fade-enter-from,
+.panel[data-axis="horizontal"] .toast.fade-leave-to {
+  transform: translateY(calc(-50% + 2px));
 }
 
 .sheet-enter-active,

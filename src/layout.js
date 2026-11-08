@@ -82,11 +82,14 @@ const SPEC = {
     axis: "horizontal",
     height: 96,
     cols: 0, // 한 줄, 가로 스크롤
-    cellW: 84,
+    // 시안은 84px(이름 76px)이지만 「서든어택(바로실행)」 같은 이름이 6~7자에서
+    // 잘렸습니다. 하단 바는 폭이 화면 전체라 가로 여유가 있어 v0.3.1에서 넓혔습니다.
+    // 높이와 무관한 값이라 창 높이 계산에는 영향이 없습니다.
+    cellW: 100,
     cellH: 76,
     iconBox: 40,
     padY: 9,
-    nameMax: 76,
+    nameMax: 92,
   },
   center: {
     axis: "vertical",

@@ -317,16 +317,89 @@ fn is_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+/// 사용자가 UAC 창에서 「아니요」를 눌렀을 때 돌려주는 값. 프런트엔드는 조용히 넘어간다.
+const LAUNCH_CANCELLED: &str = "cancelled";
+
+/// 항목 실행. `admin`이면 관리자 권한으로 (UAC 확인 창이 뜬다).
 #[tauri::command(async)]
-fn launch(app: AppHandle, path: String) -> Result<(), String> {
+fn launch(app: AppHandle, path: String, admin: Option<bool>) -> Result<(), String> {
+    let admin = admin.unwrap_or(false);
     if is_url(&path) {
-        app.opener()
+        return app
+            .opener()
             .open_url(&path, None::<&str>)
-            .map_err(|e| e.to_string())
-    } else {
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(windows)]
+    {
+        let _ = app;
+        // ShellExecute는 COM을 쓰는 셸 확장을 부를 수 있어서, 아파트먼트를
+        // 깨끗하게 초기화한 전용 스레드에서 돌린다.
+        std::thread::spawn(move || shell_execute(&path, admin))
+            .join()
+            .map_err(|_| "실행 스레드가 비정상 종료했습니다".to_string())?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = admin;
         app.opener()
             .open_path(&path, None::<&str>)
             .map_err(|e| e.to_string())
+    }
+}
+
+/// 파일 · 폴더 · 바로가기를 셸로 연다.
+///
+/// 예전에는 opener 플러그인에 맡겼는데, 그러면 exe의 작업 폴더가 런처의
+/// 작업 폴더가 된다. 게임처럼 자기 폴더의 파일을 상대 경로로 찾는 프로그램은
+/// 그러면 못 뜬다. exe 등 파일은 그 파일이 있는 폴더를 작업 폴더로 준다.
+/// (바로가기는 바로가기 안의 「시작 위치」가 우선한다)
+#[cfg(windows)]
+fn shell_execute(path: &str, admin: bool) -> Result<(), String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Foundation::{GetLastError, ERROR_CANCELLED};
+    use windows::Win32::System::Com::{
+        CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    };
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let p = Path::new(path);
+    let file = HSTRING::from(path);
+    let dir = if p.is_file() {
+        p.parent()
+            .map(|d| HSTRING::from(d.to_string_lossy().as_ref()))
+    } else {
+        None
+    };
+    let runas = HSTRING::from("runas");
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        let verb = if admin {
+            PCWSTR(runas.as_ptr())
+        } else {
+            PCWSTR::null() // 기본 동작 (보통 「열기」)
+        };
+        let dir_ptr = dir
+            .as_ref()
+            .map(|d| PCWSTR(d.as_ptr()))
+            .unwrap_or(PCWSTR::null());
+        let r = ShellExecuteW(None, verb, &file, PCWSTR::null(), dir_ptr, SW_SHOWNORMAL);
+        // 32 이하면 실패 (ShellExecute의 오래된 반환 규약)
+        if r.0 as isize > 32 {
+            return Ok(());
+        }
+        if GetLastError() == ERROR_CANCELLED {
+            return Err(LAUNCH_CANCELLED.into());
+        }
+        Err(match r.0 as isize {
+            2 => "파일을 찾을 수 없습니다".to_string(),
+            3 => "경로를 찾을 수 없습니다".to_string(),
+            5 => "접근이 거부되었습니다".to_string(),
+            31 => "이 파일을 열 프로그램이 없습니다".to_string(),
+            n => format!("실행하지 못했습니다 (코드 {n})"),
+        })
     }
 }
 
